@@ -1,0 +1,32 @@
+# 统一换行符：仓库内一律存 LF
+* text=auto eol=lf
+
+# 二进制文件不做换行符处理
+*.gz binary
+*.jar binary
+*.war binary
+*.class binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+
+# 文本文件显式声明
+*.java text eol=lf
+*.xml  text eol=lf
+*.yml  text eol=lf
+*.yaml text eol=lf
+*.sql  text eol=lf
+*.md   text eol=lf
+*.txt  text eol=lf
+*.properties text eol=lf
+*.json text eol=lf
+
+# 由 Maven 生成/校验的文件
+mvnw text eol=lf
+mvnw.cmd text eol=crlf
+*.bat text eol=crlf

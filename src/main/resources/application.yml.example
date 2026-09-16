@@ -1,0 +1,36 @@
+# ============================================================================
+# Lumen AI 后端 — 配置模版
+# ----------------------------------------------------------------------------
+# 用途：新环境搭建时，复制本文件为 src/main/resources/application-local.yml，
+#       填入真实值即可。application-local.yml 已被 .gitignore 排除，不会入库。
+#
+#   cp src/main/resources/application.yml.example src/main/resources/application-local.yml
+#
+# 也可以通过环境变量注入（优先级高于 application-local.yml 之外的同名配置项）：
+#
+#   DEEPSEEK_API_KEY      DeepSeek API Key
+#   BOCHA_API_KEY         博查搜索 API Key（留空则自动降级到百度爬虫）
+#   DB_URL / DB_USERNAME / DB_PASSWORD   MySQL 连接信息
+#   REDIS_HOST / REDIS_PORT / REDIS_PASSWORD  Redis 连接信息
+#   JWT_SECRET            JWT 签名密钥（至少 32 字节随机串，生产环境必须覆盖）
+#   SPRING_PROFILES_ACTIVE  激活的 profile，默认 local
+#
+# ⚠️ 严禁把填写了真实值的文件提交到仓库。
+# ============================================================================
+
+spring:
+  ai:
+    deepseek:
+      api-key: sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+  datasource:
+    url: jdbc:mysql://<host>:3306/lumen_ai?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+    username: <db-user>
+    password: <db-password>
+
+lumen:
+  bocha:
+    api-key: sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+  jwt:
+    secret: <至少 32 字节的随机字符串>

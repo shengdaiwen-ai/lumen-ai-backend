@@ -1,0 +1,79 @@
+# ============================================================================
+# 本地真实配置（含数据库密码 / API Key / JWT 密钥）— 严禁入库
+# ============================================================================
+src/main/resources/application-local.yml
+src/main/resources/application-local-*.yml
+application-local.yml
+application-local-*.yml
+.env
+.env.local
+
+# ============================================================================
+# Maven 构建产物
+# ============================================================================
+target/
+!.mvn/wrapper/maven-wrapper.jar
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+pom.xml.next
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+.mvn/timing.properties
+
+# ============================================================================
+# 运行日志（含完整请求内容与用户数据，且体积大）
+# ============================================================================
+logs/
+*.log
+*.log.*
+*.gz
+hs_err_pid*
+replay_pid*
+
+# ============================================================================
+# IDE — JetBrains（保留可共享的工程配置，忽略本机状态）
+# ============================================================================
+.idea/workspace.xml
+.idea/tasks.xml
+.idea/usage.statistics.xml
+.idea/shelf/
+.idea/dictionaries/
+.idea/uiDesigner.xml
+.idea/dbnavigator.xml
+.idea/dataSources/
+.idea/dataSources.ids
+.idea/dataSources.local.xml
+.idea/sqlDataSources.xml
+.idea/dynamic.xml
+.idea/libraries/
+.idea/httpRequests/
+*.iml
+*.iws
+*.ipr
+out/
+
+# IDE — Eclipse / STS
+.settings/
+.classpath
+.project
+.apt_generated/
+.factorypath
+.springBeans
+.sts4-cache
+
+# IDE — VSCode
+.vscode/
+
+# ============================================================================
+# CodeArts Doer（该目录自带全量忽略规则）
+# ============================================================================
+.codeartsdoer/
+
+# ============================================================================
+# 操作系统
+# ============================================================================
+.DS_Store
+Thumbs.db
+desktop.ini
