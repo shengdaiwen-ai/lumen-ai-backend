@@ -38,55 +38,6 @@ public class IlinkBotClient {
     }
 
     /**
-     * 探测 bot_token 是否仍然有效（主动调 iLink 接口，不依赖客户端）。
-     *
-     * 用 getupdates 短超时探测：token 有效时服务端会挂起连接（读超时属正常，视为有效）；
-     * 若返回 ret=-14 / errcode=-14，说明该 bot 已在别处重新绑定，本 token 已作废。
-     *
-     * @return true=有效；false=已失效
-     */
-    public boolean probeSession(String baseUrl, String botToken) {
-        if (botToken == null || botToken.isBlank()) return false;
-        String base = (baseUrl == null || baseUrl.isBlank()) ? "https://ilinkai.weixin.qq.com" : baseUrl;
-        try {
-            Map<String, Object> body = new LinkedHashMap<>();
-            body.put("get_updates_buf", "");
-            body.put("base_info", Map.of("channel_version", "1.0.0"));
-
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(base + "/ilink/bot/getupdates"))
-                    .timeout(Duration.ofSeconds(8))
-                    .header("Content-Type", "application/json")
-                    .header("AuthorizationType", "ilink_bot_token")
-                    .header("Authorization", "Bearer " + botToken)
-                    .header("X-WECHAT-UIN", randomUin())
-                    .POST(HttpRequest.BodyPublishers.ofString(MAPPER.writeValueAsString(body)))
-                    .build();
-
-            HttpResponse<String> resp = http.send(request, HttpResponse.BodyHandlers.ofString());
-            if (resp.statusCode() != 200) {
-                // 401/403 视为凭据失效；其它 HTTP 错误不轻易判定，避免误杀
-                log.warn("iLink 探测返回 HTTP {}", resp.statusCode());
-                return resp.statusCode() != 401 && resp.statusCode() != 403;
-            }
-            JsonNode node = MAPPER.readTree(resp.body());
-            int ret = node.path("ret").asInt(node.path("errcode").asInt(0));
-            if (ret == -14) {
-                log.info("iLink 探测: 会话已失效 ret=-14");
-                return false;
-            }
-            return true;
-        } catch (java.net.http.HttpTimeoutException e) {
-            // 长轮询挂起导致读超时 = token 有效（服务端在等消息）
-            return true;
-        } catch (Exception e) {
-            // 网络异常无法判定，保守认为有效，避免误清绑定
-            log.warn("iLink 探测异常，暂视为有效: {}", e.getMessage());
-            return true;
-        }
-    }
-
-    /**
      * 发送文本消息
      * @return ret == 0 表示成功
      */

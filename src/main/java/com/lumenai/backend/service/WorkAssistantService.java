@@ -36,7 +36,6 @@ public class WorkAssistantService {
     private final ChannelAccountMapper accountMapper;
     private final ChannelMessageMapper messageMapper;
     private final ChannelReplyService channelReplyService;
-    private final IlinkBotClient ilinkBotClient;
 
     /** 事务提交后再异步触发 AI 回复，保证异步线程能读到刚入库的 inbound */
     private void triggerAutoReply(ChannelAccount account, ChannelMessage inbound) {
@@ -189,15 +188,20 @@ public class WorkAssistantService {
     }
 
     /**
-     * 校验当前用户绑定的 token 是否仍然有效（主动探测 iLink）。
+     * 校验绑定态的**本地**一致性（零网络调用）。
      *
-     * 必要性：Electron 侧只有在「本机凭据存在且监听在跑」时才能通过 ret=-14 感知失效；
-     * 若本机凭据已丢失（例如换机、清缓存），就永远发现不了，服务端状态会一直停在 bound。
-     * 这里用库里存的 token 主动探一次，作为不依赖客户端的兜底。
+     * 为什么不做主动探测：
+     *   1) 探测只能用 iLink 的 getupdates 长轮询实现——token 有效时服务端会挂住连接，
+     *      探测必然要等满读超时（8s）才返回，直接用在这个 GET 接口上会让页面每次进都要卡 8 秒；
+     *   2) 更严重的是：getupdates 的游标由 Electron 主进程独占持有（它才是唯一的长轮询方），
+     *      服务端再拿同一个 bot_token 发一次空游标请求，可能把消息抢到探测请求上（而后端会丢弃响应体），
+     *      导致桌面端漏收消息。
+     * 因此 token 有效性只由「持有真实长轮询的 Electron 主进程」判定（ret=-14 → /accounts/session-expired），
+     * 服务端这里只纠正「标记为 bound 但凭据为空」这类脏数据。
      *
-     * @return true=有效；false=已失效（并已标记解绑）
+     * @return true=绑定态可用；false=无绑定或已纠正为未绑定
      */
-    public boolean verifyBinding(String channel) {
+    public boolean verifyBindingLocally(String channel) {
         Long userId = UserContext.get();
         if (userId == null) return false;
         ChannelAccount account = accountMapper.selectOne(new LambdaQueryWrapper<ChannelAccount>()
@@ -207,15 +211,10 @@ public class WorkAssistantService {
         if (account.getBotToken() == null || account.getBotToken().isBlank()) {
             // 无 token 却标记为 bound，属脏数据，直接纠正
             markOffline(account);
+            log.info("绑定态脏数据已纠正（bound 但无 token）: userId={}, channel={}", userId, channel);
             return false;
         }
-
-        boolean alive = ilinkBotClient.probeSession(account.getBaseUrl(), account.getBotToken());
-        if (!alive) {
-            markOffline(account);
-            log.info("主动探测发现绑定已失效，已标记解绑: userId={}, channel={}", userId, channel);
-        }
-        return alive;
+        return true;
     }
 
     /** 置为未绑定并清空凭据 */
