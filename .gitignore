@@ -36,6 +36,7 @@ replay_pid*
 # IDE — JetBrains（保留可共享的工程配置，忽略本机状态）
 # ============================================================================
 .idea/workspace.xml
+.idea/vcs.xml
 .idea/tasks.xml
 .idea/usage.statistics.xml
 .idea/shelf/
