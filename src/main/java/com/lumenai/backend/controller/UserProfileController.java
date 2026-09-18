@@ -32,8 +32,7 @@ public class UserProfileController {
         Map<String, Object> data = Map.of(
                 "permissionMode", u.getPermissionMode() != null ? u.getPermissionMode() : "smart",
                 "username", u.getUsername(),
-                "email", u.getEmail(),
-                "plan", u.getPlan()
+                "email", u.getEmail()
         );
         return R.ok(data);
     }

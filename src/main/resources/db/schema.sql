@@ -17,13 +17,12 @@ CREATE TABLE users (
   email        VARCHAR(128) NOT NULL UNIQUE,
   username     VARCHAR(64)  NOT NULL,
   password     VARCHAR(255) NOT NULL COMMENT 'BCrypt hash',
-  plan         VARCHAR(16)  NOT NULL DEFAULT 'free' COMMENT 'free / pro',
-  credits      INT          NOT NULL DEFAULT 0,
+  balance      DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '账户余额（元），可用于购买套餐',
   avatar_url   VARCHAR(500) DEFAULT NULL,
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_email (email)
-) ENGINE=InnoDB COMMENT='用户表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户表';
 
 -- --------------------------- sessions ---------------------------
 DROP TABLE IF EXISTS sessions;
@@ -37,7 +36,7 @@ CREATE TABLE sessions (
   updated_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_status (status),
   INDEX idx_created (created_at)
-) ENGINE=InnoDB COMMENT='会话表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话表';
 
 -- --------------------------- messages ---------------------------
 DROP TABLE IF EXISTS messages;
@@ -57,7 +56,7 @@ CREATE TABLE messages (
   INDEX idx_session (session_id),
   INDEX idx_role (role),
   CONSTRAINT fk_msg_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-) ENGINE=InnoDB COMMENT='消息表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息表';
 
 -- --------------------------- tool_calls ---------------------------
 DROP TABLE IF EXISTS tool_calls;
@@ -74,7 +73,7 @@ CREATE TABLE tool_calls (
   INDEX idx_tool_name (tool_name),
   INDEX idx_status (status),
   CONSTRAINT fk_tc_message FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-) ENGINE=InnoDB COMMENT='工具调用表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='工具调用表';
 
 -- --------------------------- memories ---------------------------
 DROP TABLE IF EXISTS memories;
@@ -88,7 +87,7 @@ CREATE TABLE memories (
   created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_scope (scope, scope_id),
   INDEX idx_ttl (ttl_days)
-) ENGINE=InnoDB COMMENT='记忆表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='记忆表';
 
 -- --------------------------- plugins ---------------------------
 DROP TABLE IF EXISTS plugins;
@@ -101,7 +100,7 @@ CREATE TABLE plugins (
   installed_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_name (name),
   INDEX idx_enabled (enabled)
-) ENGINE=InnoDB COMMENT='插件表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='插件表';
 
 -- --------------------------- mcp_servers ---------------------------
 DROP TABLE IF EXISTS mcp_servers;
@@ -115,7 +114,7 @@ CREATE TABLE mcp_servers (
   auth_config  JSON          DEFAULT NULL,
   created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_status (status)
-) ENGINE=InnoDB COMMENT='MCP 服务器表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MCP 服务器表';
 
 -- --------------------------- schedules ---------------------------
 DROP TABLE IF EXISTS schedules;
@@ -141,7 +140,7 @@ CREATE TABLE schedules (
   INDEX idx_sched_user (user_id),
   INDEX idx_status (status),
   INDEX idx_sched_freq (frequency)
-) ENGINE=InnoDB COMMENT='定时任务表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='定时任务表';
 
 -- --------------------------- schedule_runs ---------------------------
 DROP TABLE IF EXISTS schedule_runs;
@@ -158,7 +157,7 @@ CREATE TABLE schedule_runs (
   INDEX idx_user (user_id),
   INDEX idx_status (status),
   CONSTRAINT fk_runs_schedule FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE
-) ENGINE=InnoDB COMMENT='定时任务执行历史表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='定时任务执行历史表';
 
 -- --------------------------- permissions ---------------------------
 DROP TABLE IF EXISTS permissions;
@@ -167,7 +166,7 @@ CREATE TABLE permissions (
   tool_name    VARCHAR(64)   NOT NULL UNIQUE,
   default_mode VARCHAR(32)   NOT NULL DEFAULT 'ask_user' COMMENT 'auto_allow=安全操作,隔离环境下自动放行 | ask_user=重要操作,手动审批需用户确认,自动审批AI自动批准 | deny=高风险操作,隔离环境下直接阻止',
   updated_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB COMMENT='工具权限配置表';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='工具权限配置表';
 
 -- 初始化内置工具权限
 INSERT INTO permissions (tool_name, default_mode) VALUES

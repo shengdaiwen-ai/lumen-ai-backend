@@ -7,6 +7,7 @@ import com.lumenai.backend.agent.tool.ToolRegistry;
 import com.lumenai.backend.auth.UserContext;
 import com.lumenai.backend.config.LumenProperties;
 import com.lumenai.backend.dto.ChatMessageRequest;
+import com.lumenai.backend.dto.BillingUsage;
 import com.lumenai.backend.entity.Session;
 import com.lumenai.backend.mapper.MessageMapper;
 import com.lumenai.backend.mapper.UserMapper;
@@ -332,6 +333,30 @@ public class AgentEngine {
      * 运行 Agent 循环，返回 SSE 流。最后一个 done 事件包含 finalContent（完整 assistant 回复）。
      */
     public Flux<ServerSentEvent<String>> run(Session session, ChatMessageRequest request) {
+        return run(session, request, null);
+    }
+
+    /**
+     * 本次请求将使用的模型 code（**计价用**）。
+     *
+     * <p>与 {@link #run} 内部的选型规则保持同一个口径（有图片 → flash，否则配置模型），
+     * 供预扣阶段在真正调模型之前就确定「按哪个模型的单价估」。规则只能有一处，
+     * 否则预扣按 pro 估、结算按 flash 算，退款额会莫名其妙。</p>
+     */
+    public String modelCodeFor(ChatMessageRequest request) {
+        boolean hasImage = request != null && request.getAttachments() != null
+                && request.getAttachments().stream().anyMatch(AttachmentDto::isImage);
+        return hasImage ? "deepseek-flash" : configuredModel;
+    }
+
+    /**
+     * 运行 Agent 循环（带用量快照）。
+     *
+     * <p>{@code billingUsage} 是给扣费服务读的<b>真实用量出口</b>：客户端断连时下游的
+     * {@code map/doOnNext} 不会执行，只有本方法 finally 块里的快照能留下来，
+     * 取消/中断的对话因此也能按实际消耗结算。传 null 表示调用方不关心（如定时任务）。</p>
+     */
+    public Flux<ServerSentEvent<String>> run(Session session, ChatMessageRequest request, BillingUsage billingUsage) {
         AtomicBoolean cancelled = new AtomicBoolean(false);
         Sinks.Many<ServerSentEvent<String>> sink = Sinks.many().multicast().onBackpressureBuffer(512);
 
@@ -407,7 +432,7 @@ public class AgentEngine {
         if (hasImage) {
             log.info("[hasImage=true] early return → streamDeepseekFlashNative(), deepseekApiKey present={}",
                     deepseekApiKey != null && !deepseekApiKey.isBlank());
-            Flux<ServerSentEvent<String>> nativeFlux = streamDeepseekFlashNative(finalMessages, request, session);
+            Flux<ServerSentEvent<String>> nativeFlux = streamDeepseekFlashNative(finalMessages, request, session, billingUsage);
             log.info("[hasImage=true] returned from streamDeepseekFlashNative, flux={}", nativeFlux != null);
             return nativeFlux;
         }
@@ -432,12 +457,26 @@ public class AgentEngine {
                 meta.latencyMs = System.currentTimeMillis() - totalStart;
                 log.info("[DEBUG] Agent finally block, cancelled={}, finalContentLen={}, thread={}", cancelled.get(), finalContent.length(), Thread.currentThread().getName());
                 try {
-                    // 用配置兜底 model（Spring AI 2.0 DeepSeek 流式不返回 model/usage metadata）
+                    // model 取 chunk 类型字段里的真实值（readUsage 收集），取不到才用配置兜底
                     String model = (meta.model != null && !meta.model.isBlank()) ? meta.model : configuredModel;
 
                     Map<String, Object> usage = new LinkedHashMap<>();
                     usage.put("input_tokens", meta.inputTokens);
                     usage.put("output_tokens", meta.outputTokens);
+                    // 缓存拆分（DeepSeek 命中输入更便宜，计价靠这三个字段区分命中/未命中）
+                    usage.put("cache_hit_tokens", meta.cacheHitTokens);
+                    usage.put("cache_miss_tokens", meta.cacheMissTokens);
+                    usage.put("estimated", meta.estimated);
+
+                    if (billingUsage != null) {
+                        billingUsage.setModel(model);
+                        billingUsage.setInputTokens(meta.inputTokens);
+                        billingUsage.setOutputTokens(meta.outputTokens);
+                        billingUsage.setCacheHitTokens(meta.cacheHitTokens);
+                        billingUsage.setCacheMissTokens(meta.cacheMissTokens);
+                        billingUsage.setEstimated(meta.estimated);
+                        billingUsage.setContentLength(finalContent.length());
+                    }
 
                     Map<String, Object> donePayload = new LinkedHashMap<>();
                     donePayload.put("usage", usage);
@@ -696,32 +735,15 @@ public class AgentEngine {
             // 1. 流式调用 LLM，逐个 chunk 发 SSE text 事件，同时收集所有 chunks
             Flux<ChatResponse> stream = chatModel.stream(prompt);
 
+            // 本轮 usage 暂存 {输入, 输出, 缓存命中}：流结束后并入 meta（工具轮次会多轮调上游，需逐轮相加）
+            int[] roundUsage = new int[3];
+
             List<ChatResponse> chunks;
             try {
                 chunks = stream
                     .takeUntil(item -> cancelled.get())
                     .doOnNext(chunk -> {
-                        // 从 chunk metadata 里尝试提取 tokens 和 model（遍历 Map，兼容 Spring AI 2.0 的各种 provider 实现）
-                        try {
-                            var crMeta = chunk.getMetadata();  // ChatResponseMetadata extends Map
-                            for (Map.Entry<String, Object> e : crMeta.entrySet()) {
-                                String k = e.getKey().toLowerCase();
-                                Object v = e.getValue();
-                                // 模型名
-                                if ((k.equals("model") || k.equals("Model")) && v instanceof String s && !s.isBlank()) {
-                                    meta.model = s;
-                                }
-                                // usage（可能是嵌套 Map）
-                                if ((k.equals("usage") || k.equals("Usage")) && v instanceof Map<?, ?> um) {
-                                    Object in = um.get("input_tokens");
-                                    if (in == null) in = um.get("prompt_tokens");
-                                    Object out = um.get("output_tokens");
-                                    if (out == null) out = um.get("completion_tokens");
-                                    if (in instanceof Number n) meta.inputTokens += n.intValue();
-                                    if (out instanceof Number n) meta.outputTokens += n.intValue();
-                                }
-                            }
-                        } catch (Exception ignored) {}
+                        readUsage(chunk, meta, roundUsage);
 
                         // DEBUG: 打印 chunk 结构，找 reasoning_content
                         if (log.isDebugEnabled()) {
@@ -774,6 +796,11 @@ public class AgentEngine {
                         .build());
                 return;
             }
+
+            // 本轮结束：并入整任务累计（取消导致中途截断时，这里拿到的就是已产生的那部分）
+            meta.inputTokens += roundUsage[0];
+            meta.outputTokens += roundUsage[1];
+            meta.cacheHitTokens += roundUsage[2];
 
             if (chunks == null || chunks.isEmpty()) {
                 log.warn("LLM returned empty response at round {}", round);
@@ -914,7 +941,7 @@ public class AgentEngine {
 
         log.info("Agent loop completed (max rounds: {})", lumenProperties.getAi().getAgent().getMaxLoopRounds());
 
-        // 兜底：如果流式没返回 usage，用文本长度估算 token
+        // 兜底：上游整段没给 usage 时才退化成 chars/4 估算（正常情况下不该走到这里）
         if (meta.inputTokens == 0) {
             // 输入 token = 所有消息文本长度 / 4（粗略估算）
             int inputChars = 0;
@@ -922,10 +949,57 @@ public class AgentEngine {
                 if (m.getText() != null) inputChars += m.getText().length();
             }
             meta.inputTokens = inputChars / 4;
+            // 估算值要留痕：置 estimated 标记，结算写进流水 estimated 列，明细页据此标注
+            meta.estimated = true;
         }
         if (meta.outputTokens == 0) {
             // 输出 token = 最终回复文本长度 / 4
             meta.outputTokens = finalContent.length() / 4;
+            meta.estimated = true;
+        }
+        // 上游没给缓存拆分时，全部输入按「未命中」计（保守口径，见 BillingUsage#missTokens）。
+        // ⚠️ Spring AI 的流式聚合会把 DeepSeek 的 prompt_tokens_details.cachedTokens 丢掉
+        //    （UsageCalculator 重建 DefaultUsage 时 nativeUsage 传 null），所以 Web 聊天链路
+        //    拿不到缓存命中数 —— 这是「缓存拆分缺失」，与「token 是估算值」是两件事，
+        //    后者才置 estimated。（想拿到命中数得绕开 Spring AI 自己读原生 SSE，暂不做。）
+        if (meta.cacheHitTokens == 0 && meta.cacheMissTokens == 0) {
+            meta.cacheMissTokens = meta.inputTokens;
+        }
+    }
+
+    /**
+     * 读一次流式 chunk 的 usage，写入本轮快照（{@code round[0]=输入, [1]=输出, [2]=缓存命中}）。
+     *
+     * <p>🔴 <b>必须走类型化 accessor</b>：Spring AI 2.0 的 usage 挂在
+     * {@link org.springframework.ai.chat.metadata.ChatResponseMetadata#getUsage()} 这个<b>字段</b>上，
+     * 而 {@code getMetadata().entrySet()} 里只有 {@code keyValue()} 写进去的附加键
+     * （finishReason / role 之类），<b>永远不含 usage</b>。历史实现按 Map 取 {@code "usage"}
+     * 取了个空，整条链路静默退化成 chars/4 估算 —— 真实事故：流水标题张张都带 [估算] 前缀。</p>
+     *
+     * <p>同一轮里上游只在<b>最后一个</b> chunk 给 usage（且是整轮的累计值），前面的 chunk 是
+     * EmptyUsage；所以这里做「末次为准」覆盖，而不是逐 chunk 累加 —— 累加会把同一份用量
+     * 按 chunk 数重复计数。跨轮（工具调用多轮）的相加由调用方在流结束后完成。</p>
+     */
+    private void readUsage(ChatResponse chunk, Metadata meta, int[] round) {
+        try {
+            if (chunk == null || chunk.getMetadata() == null) return;
+            // 模型名同样只在类型字段上（Map 里取不到），最后一次覆盖即真实模型
+            String model = chunk.getMetadata().getModel();
+            if (model != null && !model.isBlank()) {
+                meta.model = model;
+            }
+            var usage = chunk.getMetadata().getUsage();
+            if (usage == null || usage.getTotalTokens() == null || usage.getTotalTokens() <= 0) {
+                return;  // 没有 usage 的 chunk（含 EmptyUsage）不动本轮快照
+            }
+            Integer in = usage.getPromptTokens();
+            Integer out = usage.getCompletionTokens();
+            Long hit = usage.getCacheReadInputTokens();
+            round[0] = in == null ? 0 : in;
+            round[1] = out == null ? 0 : out;
+            round[2] = hit == null ? 0 : hit.intValue();
+        } catch (Exception e) {
+            log.debug("读取 chunk usage 失败（忽略，走估算兜底）: {}", e.getMessage());
         }
     }
 
@@ -992,7 +1066,7 @@ public class AgentEngine {
      * 用 BufferedReader 逐行读 SSE，按 data: {...} 解析后 emit 到 sink。
      */
     private Flux<ServerSentEvent<String>> streamDeepseekFlashNative(
-            List<Message> messages, ChatMessageRequest request, Session session) {
+            List<Message> messages, ChatMessageRequest request, Session session, BillingUsage billingUsage) {
 
         Sinks.Many<ServerSentEvent<String>> sink = Sinks.many().multicast().onBackpressureBuffer(512);
         log.info("[NativeVision] ENTER streamDeepseekFlashNative, attachments={}",
@@ -1100,7 +1174,7 @@ public class AgentEngine {
                 // === 5. 读 SSE 流 ===
                 long startMs = System.currentTimeMillis();
                 StringBuilder finalContent = new StringBuilder();
-                int inputTokens = 0, outputTokens = 0;
+                int inputTokens = 0, outputTokens = 0, cacheHitTokens = 0, cacheMissTokens = 0;
 
                 try (var reader = new java.io.BufferedReader(
                         new java.io.InputStreamReader(conn.getInputStream(), java.nio.charset.StandardCharsets.UTF_8))) {
@@ -1137,6 +1211,12 @@ public class AgentEngine {
                                         Object out = usage.get("completion_tokens");
                                         if (in instanceof Number n) inputTokens = n.intValue();
                                         if (out instanceof Number n) outputTokens = n.intValue();
+                                        // 原生 SSE 里缓存拆分是现成的（prompt_cache_hit/miss_tokens），直接收下：
+                                        // 命中输入按 cache_ratio 折价，不收就只能全按未命中算，用户白多付钱
+                                        Object hit = usage.get("prompt_cache_hit_tokens");
+                                        Object miss = usage.get("prompt_cache_miss_tokens");
+                                        if (hit instanceof Number n) cacheHitTokens = n.intValue();
+                                        if (miss instanceof Number n) cacheMissTokens = n.intValue();
                                     }
                                 } catch (Exception parseErr) {
                                     log.debug("[NativeVision] SSE parse skip: {}", json.substring(0, Math.min(80, json.length())));
@@ -1167,9 +1247,40 @@ public class AgentEngine {
                 donePayload.put("finalContent", finalContent.toString());
                 donePayload.put("latencyMs", latency);
                 // 两种 token 格式都发，兼容 ChatController 和前端
+                // 缓存拆分：上游给了就用（命中输入按 cache_ratio 折价），没给就全按未命中（保守口径）
+                int hitTokens = cacheHitTokens;
+                int missTokens = (cacheHitTokens + cacheMissTokens) > 0 ? cacheMissTokens : inputTokens;
                 Map<String, Object> usage = new java.util.HashMap<>();
                 usage.put("input_tokens", inputTokens);
                 usage.put("output_tokens", outputTokens);
+                usage.put("cache_hit_tokens", hitTokens);
+                usage.put("cache_miss_tokens", missTokens);
+                // 原生通道的 usage 也来自上游 SSE；整段没拿到就按 chars/4 估算并留痕
+                boolean estimated = inputTokens == 0 && outputTokens == 0;
+                if (estimated) {
+                    int inputChars = 0;
+                    for (Message m : messages) {
+                        if (m.getText() != null) inputChars += m.getText().length();
+                    }
+                    inputTokens = inputChars / 4;
+                    outputTokens = finalContent.length() / 4;
+                    hitTokens = 0;
+                    missTokens = inputTokens;
+                    usage.put("input_tokens", inputTokens);
+                    usage.put("output_tokens", outputTokens);
+                    usage.put("cache_hit_tokens", hitTokens);
+                    usage.put("cache_miss_tokens", missTokens);
+                }
+                usage.put("estimated", estimated);
+                if (billingUsage != null) {
+                    billingUsage.setModel("deepseek-flash");
+                    billingUsage.setInputTokens(inputTokens);
+                    billingUsage.setOutputTokens(outputTokens);
+                    billingUsage.setCacheHitTokens(hitTokens);
+                    billingUsage.setCacheMissTokens(missTokens);
+                    billingUsage.setEstimated(estimated);
+                    billingUsage.setContentLength(finalContent.length());
+                }
                 donePayload.put("usage", usage);
                 donePayload.put("inputTokens", inputTokens);
                 donePayload.put("outputTokens", outputTokens);
@@ -1193,6 +1304,12 @@ public class AgentEngine {
     static class Metadata {
         int inputTokens;
         int outputTokens;
+        /** 缓存命中的输入 token（DeepSeek prompt_cache_hit_tokens） */
+        int cacheHitTokens;
+        /** 缓存未命中的输入 token */
+        int cacheMissTokens;
+        /** true = token 为 chars/4 估算值（上游未返回 usage） */
+        boolean estimated;
         long latencyMs;
         String model;
         final List<Map<String, Object>> toolCalls = new ArrayList<>();

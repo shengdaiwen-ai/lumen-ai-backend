@@ -55,6 +55,14 @@ public class Message {
     @TableField("latency_ms")
     private Integer latencyMs;
 
+    /** 本条消息实际消耗积分（服务端两阶段结算结果；NULL = 未扣费，如免费模型） */
+    @TableField("credits_cost")
+    private Integer creditsCost;
+
+    /** tokens 是否为 chars/4 估算（上游未返回 usage 时置位，前端展示「约」） */
+    @TableField("credits_estimated")
+    private Boolean creditsEstimated;
+
     private Boolean cancelled;
 
     @TableField("created_at")

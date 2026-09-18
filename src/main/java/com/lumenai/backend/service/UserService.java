@@ -6,6 +6,7 @@ import com.lumenai.backend.common.exception.BusinessException;
 import com.lumenai.backend.dto.AuthResponse;
 import com.lumenai.backend.dto.LoginRequest;
 import com.lumenai.backend.dto.RegisterRequest;
+import com.lumenai.backend.entity.SubscriptionPlan;
 import com.lumenai.backend.entity.User;
 import com.lumenai.backend.mapper.UserMapper;
 import lombok.RequiredArgsConstructor;
@@ -16,6 +17,10 @@ import java.time.LocalDateTime;
 
 /**
  * 用户认证服务 — 注册、登录、用户信息
+ *
+ * <p>登录/注册响应里的积分与套餐都来自各自权威源（积分账户表、已购订阅表），
+ * 且<b>在取值前先触发一次积分补发</b> —— 积分按月发放且项目没有定时任务，
+ * 登录是最自然的补发时机。</p>
  */
 @Service
 @RequiredArgsConstructor
@@ -24,6 +29,9 @@ public class UserService {
     private final UserMapper userMapper;
     private final BCryptPasswordEncoder passwordEncoder = new BCryptPasswordEncoder();
     private final JwtUtil jwtUtil;
+    private final CreditService creditService;
+    private final CreditGrantService creditGrantService;
+    private final SubscriptionService subscriptionService;
 
     /** 注册 */
     public AuthResponse register(RegisterRequest req) {
@@ -39,8 +47,6 @@ public class UserService {
         // 用户名取邮箱 @ 前的部分
         user.setUsername(req.getEmail().split("@")[0]);
         user.setPassword(passwordEncoder.encode(req.getPassword()));
-        user.setPlan("free");
-        user.setCredits(0);
         user.setCreatedAt(LocalDateTime.now());
         user.setUpdatedAt(LocalDateTime.now());
         userMapper.insert(user);
@@ -67,12 +73,17 @@ public class UserService {
     private AuthResponse buildResponse(User user) {
         String accessToken = jwtUtil.generate(user.getId(), user.getEmail(), user.getUsername());
         String refreshToken = jwtUtil.generateRefresh(user.getId(), user.getEmail(), user.getUsername());
+        // 先把到点未发的月度积分补齐，再取余额 —— 否则跨月首次登录会显示旧余额
+        creditGrantService.grantDue(user.getId());
+        SubscriptionPlan current = subscriptionService.currentActivePlan(user.getId());
         return AuthResponse.builder()
                 .id(user.getId())
                 .username(user.getUsername())
                 .email(user.getEmail())
-                .plan(user.getPlan())
-                .credits(user.getCredits())
+                .planCode(current == null ? null : current.getCode())
+                .planName(current == null ? null : current.getName())
+                .credits(creditService.generalBalanceOf(user.getId()))
+                .balance(user.getBalance())
                 .permissionMode(user.getPermissionMode() != null ? user.getPermissionMode() : "smart")
                 .avatarUrl(user.getAvatarUrl())
                 .token(accessToken)

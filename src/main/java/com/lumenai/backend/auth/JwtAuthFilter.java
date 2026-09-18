@@ -35,6 +35,8 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             "/api/schedule-runs",
             "/api/files",
             "/api/profile",
+            "/api/subscription",
+            "/api/credits",
             "/api/work-assistant/accounts",
             "/api/work-assistant/messages",
             "/api/work-assistant/sessions",
