@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS channel_accounts (
   INDEX idx_user (user_id),
   INDEX idx_channel (channel),
   UNIQUE KEY uk_user_channel (user_id, channel)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='办公助理通道账号绑定';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='办公助理通道账号绑定';
 
 CREATE TABLE IF NOT EXISTS channel_messages (
   id               BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
@@ -47,4 +47,4 @@ CREATE TABLE IF NOT EXISTS channel_messages (
   INDEX idx_peer (peer_id),
   INDEX idx_created (created_at),
   INDEX idx_direction (direction)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COMMENT='办公助理通道消息';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='办公助理通道消息';

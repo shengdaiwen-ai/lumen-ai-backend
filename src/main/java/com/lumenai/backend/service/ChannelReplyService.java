@@ -1,8 +1,12 @@
 package com.lumenai.backend.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.lumenai.backend.dto.BillingUsage;
+import com.lumenai.backend.dto.CreditsInfoVO;
 import com.lumenai.backend.entity.ChannelAccount;
 import com.lumenai.backend.entity.ChannelMessage;
+import com.lumenai.backend.entity.CreditHold;
 import com.lumenai.backend.mapper.ChannelMessageMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -15,6 +19,7 @@ import org.springframework.ai.chat.model.ChatModel;
 import org.springframework.ai.chat.model.ChatResponse;
 import org.springframework.ai.chat.prompt.Prompt;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.time.LocalDateTime;
@@ -40,6 +45,11 @@ public class ChannelReplyService {
     private final IlinkBotClient ilinkBotClient;
     private final ReplyStreamRegistry registry;
     private final ObjectProvider<ChatModel> chatModelProvider;
+    private final ChatBillingService billingService;
+
+    /** 与 AgentEngine 同一个配置项：通道回复也用这台默认模型，计价口径才对得上 */
+    @Value("${spring.ai.deepseek.chat.model:deepseek-chat}")
+    private String configuredModel;
 
     private static final String SYSTEM_PROMPT =
             "你是 Lumen AI 助手，正在通过微信与用户对话。" +
@@ -116,6 +126,25 @@ public class ChannelReplyService {
             }
         }
 
+        // ===== 阶段 1：预扣（与 Web 聊天同一套两阶段引擎，只是通道不同）=====
+        // 幂等键用「账号 + 消息 id」派生：同一条微信消息重放（iLink 重推、点重新生成）不会二次预扣
+        String requestId = "ilink-" + account.getId() + "-" + inbound.getId();
+        long promptChars = SYSTEM_PROMPT.length();
+        for (Message m : promptMessages) {
+            if (m.getText() != null) {
+                promptChars += m.getText().length();
+            }
+        }
+        ChatBillingService.HoldResult hold = billingService.hold(account.getUserId(), requestId, null,
+                CreditHold.CHANNEL_ILINK, configuredModel, ChatBillingService.estimateTokens(promptChars));
+        if (hold.insufficient()) {
+            String tip = "积分已用尽，请到 Lumen AI 客户端购买或升级套餐后再使用";
+            log.info("通道回复被拒绝（积分不足）userId={} peerId={}", account.getUserId(), inbound.getPeerId());
+            registry.fail(streamKey, tip);
+            sendTip(account, inbound, tip);
+            return;
+        }
+
         // 2. 流式调模型，逐片写入注册表
         log.info("生成 AI 回复(流式): accountId={}, peerId={}, 历史{}条", account.getId(), inbound.getPeerId(), history.size());
         ReplyStreamRegistry.State state = registry.start(streamKey);
@@ -140,7 +169,9 @@ public class ChannelReplyService {
                 }
             }
         } catch (Exception e) {
+            // 上游报错、零产出 → 预扣额全额退回，用户不该为失败的请求付钱
             registry.fail(streamKey, e.getMessage());
+            refundQuietly(account.getUserId(), requestId, "通道回复上游报错");
             throw e;
         }
 
@@ -148,6 +179,7 @@ public class ChannelReplyService {
         if (reply.isEmpty()) {
             log.warn("AI 回复为空，跳过");
             registry.fail(streamKey, "回复为空");
+            refundQuietly(account.getUserId(), requestId, "通道回复为空");
             return;
         }
 
@@ -185,6 +217,67 @@ public class ChannelReplyService {
                 sent ? "发送" : "入库但发送失败", inbound.getPeerId(), reply.length(), inputTokens, outputTokens);
 
         state.setUsage(inputTokens, outputTokens);
+
+        // ===== 阶段 2：结算（多退少补，写消耗流水）=====
+        settleQuietly(account, inbound, out, requestId, promptChars, inputTokens, outputTokens, reply);
+
         registry.finish(streamKey);
+    }
+
+    /**
+     * 通道回复的结算：按真实 usage 重算并多退少补。
+     *
+     * <p>失败只告警不抛出 —— 回复已经发给用户了，此时再抛异常无法补救，
+     * 预扣单会留在 {@code held} 由惰性清扫退款兜底。</p>
+     */
+    private void settleQuietly(ChannelAccount account, ChannelMessage inbound, ChannelMessage out,
+                              String requestId, long promptChars, int inputTokens, int outputTokens, String reply) {
+        try {
+            boolean estimated = inputTokens == 0 && outputTokens == 0;
+            BillingUsage usage = new BillingUsage();
+            usage.setModel(configuredModel);
+            usage.setInputTokens(estimated ? (int) (promptChars / 4) : inputTokens);
+            usage.setOutputTokens(estimated ? reply.length() / 4 : outputTokens);
+            // 通道侧拿不到缓存拆分字段，全部输入按「未命中」计（保守口径）
+            usage.setCacheMissTokens(usage.getInputTokens());
+            usage.setEstimated(estimated);
+            usage.setContentLength(reply.length());
+
+            String title = inbound.getContent() == null || inbound.getContent().isBlank()
+                    ? "办公助理" : inbound.getContent().trim();
+            CreditsInfoVO credits = billingService.settle(account.getUserId(), requestId, configuredModel, usage,
+                    out.getId(), "办公助理·" + title);
+
+            // 结算值冗余回消息行：历史重载时气泡 footer 直接可读，前端不自算
+            if (credits != null) {
+                out.setCreditsCost(credits.getCost());
+                out.setCreditsEstimated(credits.isEstimated());
+                messageMapper.update(null, new LambdaUpdateWrapper<ChannelMessage>()
+                        .eq(ChannelMessage::getId, out.getId())
+                        .set(ChannelMessage::getCreditsCost, credits.getCost())
+                        .set(ChannelMessage::getCreditsEstimated, credits.isEstimated()));
+            }
+        } catch (Exception e) {
+            log.warn("通道回复结算失败（预扣单将由惰性清扫退款）userId={} requestId={}", account.getUserId(), requestId, e);
+        }
+    }
+
+    /** 退款（失败路径）：本身不抛异常，避免掩盖真实错误 */
+    private void refundQuietly(Long userId, String requestId, String reason) {
+        try {
+            billingService.refund(userId, requestId, reason);
+        } catch (Exception e) {
+            log.warn("通道回复退款失败 userId={} requestId={}", userId, requestId, e);
+        }
+    }
+
+    /** 积分不足时回一条微信文本（失败不影响主流程） */
+    private void sendTip(ChannelAccount account, ChannelMessage inbound, String text) {
+        try {
+            ilinkBotClient.sendText(account.getBaseUrl(), account.getBotToken(), account.getIlinkBotId(),
+                    inbound.getPeerId(), text, inbound.getContextToken());
+        } catch (Exception e) {
+            log.warn("积分不足提示发送失败: {}", e.getMessage());
+        }
     }
 }

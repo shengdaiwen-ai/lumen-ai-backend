@@ -20,7 +20,6 @@ import java.util.Map;
 
 /**
  * 办公助理（iLink Bot）Controller
- *
  * 架构：Electron 主进程直连 iLink HTTP API，后端只做数据落库
  *   Electron 登录成功 → POST /accounts/confirm
  *   Electron 收到微信消息 → POST /messages/inbound
@@ -48,11 +47,9 @@ public class WorkAssistantController {
 
     /**
      * 查询某通道绑定状态。
-     *
      * 只做 DB 读取 + 零成本的脏数据纠正，**不做任何网络探测**：
      * token 有效性由持有 iLink 长轮询的 Electron 主进程判定
-     * （失效时它会调 /accounts/session-expired）。此前这里同步探测 iLink 长轮询，
-     * 健康状态下必然等满 8 秒超时，导致每次进入办公助理页都要卡 8 秒。
+     * （失效时它会调 /accounts/session-expired）
      */
     @GetMapping("/accounts/{channel}")
     public R<ChannelAccount> getAccount(@PathVariable String channel) {

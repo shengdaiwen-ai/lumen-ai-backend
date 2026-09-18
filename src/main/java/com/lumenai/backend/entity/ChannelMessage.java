@@ -57,6 +57,14 @@ public class ChannelMessage {
     @TableField("output_tokens")
     private Integer outputTokens;
 
+    /** 本条消息实际消耗积分（服务端两阶段结算结果；NULL = 未扣费） */
+    @TableField("credits_cost")
+    private Integer creditsCost;
+
+    /** tokens 是否为 chars/4 估算（前端展示「约」） */
+    @TableField("credits_estimated")
+    private Boolean creditsEstimated;
+
     @TableField(fill = FieldFill.INSERT)
     private LocalDateTime createdAt;
 }
