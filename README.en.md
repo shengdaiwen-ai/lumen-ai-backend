@@ -1,27 +1,36 @@
+
+
 # Lumen AI Backend
 
-## Project Introduction
+The server side of Lumen AI — an agent runtime and business platform for an AI coding assistant.
 
-Lumen AI Backend is an intelligent AI backend service built on Spring Boot, integrating the DeepSeek large language model. It provides comprehensive features including a conversation system, tool invocation, billing management, subscription services, and more. The system adopts a plugin-based tool architecture, supporting various AI tools such as code execution, file operations, web search, scheduled tasks, etc., allowing for flexible extension.
+It treats every question as an observable, billable, interruptible execution chain: the Agent engine drives the LLM through multi-round tool calling (file read/write/edit/search, shell and code execution, web search & fetch, scheduled tasks, sub-agents, ask-the-user, etc. — 14 built-in tools), streams token deltas, tool events and usage stats to the client via SSE, and finally settles credits based on the real usage returned by the upstream model. The subscription system is equally closed-loop on the server: plan/entitlement data is database-driven, balance-paid ordering, upgrade proration and monthly credit grants are all computed server-side — the client only consumes the results.
+
+> Desktop client: the companion repo [lumen-ai-frontend](https://gitee.com/daiwenshneg/lumen-ai-frontend).
 
 ## Core Features
 
-- **Intelligent Conversation System**: Based on the DeepSeek model, supports streaming output, context memory, and attachment processing.
-- **Tool Calling Engine**: Built-in multiple tools (code execution, file system, web search, etc.), supports permission control.
-- **Billing & Subscription**: Complete credit system, subscription plans, order management, pre-deduction mechanism.
-- **Scheduled Tasks**: Supports creation, scheduling, and management of automated tasks.
-- **Multi-channel Integration**: Supports bot integration for platforms like Feishu.
-- **Reactive Architecture**: Implements SSE streaming response using WebFlux.
+- **Agent Engine**: drives multi-round "think → tool call → observe" loops, real-time SSE streaming, and pre-call approval for write/execute tools based on permission tiers
+- **Two-phase Credit Billing**: hold → settle → refund, with model pricing, group ratios and cache-hit discounts; expired holds are lazily swept
+- **Subscription & Balance**: plans/entitlements/prices all stored in tables; atomic balance deduction, upgrade proration (arbitrage-proof), monthly credit grants & reclaim, full audit trail
+- **Sessions & Attachments**: sessions, messages and attachments persisted with logical delete
+- **Work Assistant Channel**: WeChat (iLink) bot integration, sharing the same billing engine as web chat
+- **Idempotent Startup Migration**: table creation, column addition and data backfill run automatically via `DbMigrationRunner` — no manual SQL needed
+- **Scheduled Tasks**: Quartz-powered create / run-now / toggle
 
 ## Tech Stack
 
 | Category | Technology |
 |------|------|
-| Framework | Spring Boot 3.x + Spring AI |
-| Database | MySQL / PostgreSQL + MyBatis Plus |
-| Authentication | JWT |
-| Async | Project Reactor (WebFlux) |
-| API | DeepSeek Chat API |
+| Framework | Spring Boot 4.1.1 · Java 17 |
+| AI | Spring AI 2.0.1 (DeepSeek model) |
+| Persistence | MyBatis-Plus 3.5.17 (`LambdaQueryWrapper`, zero XML) |
+| Database | MySQL 8.0 (utf8mb4) |
+| Cache | Redis |
+| Auth | Self-built JWT (jjwt 0.12.6) + BCrypt |
+| Scheduling | Quartz |
+| Streaming | WebFlux SSE |
+| Docs | SpringDoc OpenAPI (Swagger UI) |
 | Build | Maven |
 
 ## Project Structure
@@ -29,268 +38,195 @@ Lumen AI Backend is an intelligent AI backend service built on Spring Boot, inte
 ```
 lumen-ai-backend/
 ├── src/main/java/com/lumenai/backend/
-│   ├── LumenAiApplication.java          # Application Entry Point
-│   ├── agent/                           # AI Core
-│   │   ├── core/AgentEngine.java        # Agent Engine
-│   │   └── tool/Tool.java               # Tool Interface
-│   ├── auth/                            # Authentication Module
-│   │   ├── JwtAuthFilter.java           # JWT Filter
-│   │   ├── JwtUtil.java                 # JWT Utility
-│   │   └── UserContext.java             # User Context
-│   ├── config/                          # Configuration Classes
-│   ├── controller/                      # REST API Controllers
-│   │   ├── ChatController.java          # Conversation Interface
-│   │   ├── AuthController.java          # Authentication Interface
-│   │   ├── CreditController.java        # Credit Interface
-│   │   ├── ScheduleController.java      # Scheduled Task Interface
-│   │   ├── SessionController.java       # Session Management
-│   │   ├── SubscriptionController.java  # Subscription Interface
-│   │   └── WorkAssistantController.java # Work Assistant
-│   ├── dto/                             # Data Transfer Objects
-│   ├── entity/                          # Entity Classes
-│   ├── mapper/                          # MyBatis Plus Mapper
-│   ├── service/                         # Business Logic Layer
-│   └── tool/                            # Tool Implementation
-│       ├── agent/AgentTool.java         # Sub-agent
-│       ├── automation/ScheduleTool.java # Scheduled Task
-│       ├── code/ExecTool.java           # Code Execution
-│       ├── filesystem/                  # File Operations
-│       ├── interaction/                 # User Interaction
-│       ├── shell/ShellTool.java         # Shell Commands
-│       ├── time/DateTimeTool.java       # Date & Time
-│       └── web/                         # Web Tools
+│   ├── LumenAiApplication.java          # Application entry point
+│   ├── agent/                           # AI core
+│   │   ├── core/AgentEngine.java        # Agent engine (multi-round tool loop + usage stats)
+│   │   └── tool/Tool.java               # Tool interface
+│   ├── auth/                            # Authentication (JWT filter / utils / user context)
+│   ├── config/                          # Configuration (incl. DbMigrationRunner)
+│   ├── controller/                      # REST controllers (unified R<T> response)
+│   ├── dto/ / entity/ / mapper/         # DTOs / entities / mappers
+│   ├── service/                         # Business logic (incl. ChatBillingService)
+│   └── tool/                            # Built-in tools
+│       ├── agent/                       # Sub-agent
+│       ├── automation/                  # Scheduled tasks
+│       ├── code/ExecTool.java           # Code execution
+│       ├── filesystem/                  # File read/write/edit/delete/search
+│       ├── interaction/                 # Ask the user
+│       ├── shell/ShellTool.java         # Shell commands
+│       ├── time/                        # Date & time
+│       └── web/                         # Web search & fetch
 ├── src/main/resources/
-│   ├── application.yml                  # Configuration File
-│   ├── system-prompt.txt                # System Prompt
-│   └── db/migration_*.sql               # Database Migration Scripts
+│   ├── application.yml                  # Main config (activates local profile by default)
+│   ├── system-prompt.txt                # System prompt
+│   └── db/                              # Schema & migration scripts (run by the migrator)
 └── pom.xml
 ```
 
 ## Quick Start
 
-### Environment Requirements
+### Requirements
 
 - JDK 17+
-- MySQL 8.0+ / PostgreSQL 14+
+- MySQL 8.0+
+- Redis
 - Maven 3.8+
 
-### Configuration Instructions
+### Configuration
+
+Real credentials are **never committed**: the `local` profile is active by default and reads from the gitignored `application-local.yml`; everything can also be injected via environment variables:
+
+| Environment Variable | Description |
+|------|------|
+| `DB_URL` / `DB_USERNAME` / `DB_PASSWORD` | MySQL connection (database e.g. `lumen_ai`) |
+| `DEEPSEEK_API_KEY` | DeepSeek API key |
+| `JWT_SECRET` | JWT signing secret (must be overridden in production) |
+| `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | Redis connection |
+| `BOCHA_API_KEY` | Bocha search key (optional; falls back to crawler search) |
+| `SPRING_PROFILES_ACTIVE` | Set to a non-`local` value in production |
+
+Key settings (defaults already in `application.yml`):
 
 ```yaml
-# application.yml Core Configuration
+server:
+  port: 9031                # service port
+  servlet:
+    context-path: /api      # all endpoints are prefixed with /api
+
 spring:
-  datasource:
-    url: jdbc:mysql://localhost:3306/lumen_ai
-    username: root
-    password: your_password
   ai:
     deepseek:
+      base-url: https://api.deepseek.com
       chat:
-        model: deepseek-chat
-        api-key: ${DEEPSEEK_API_KEY}
-        base-url: https://api.deepseek.com
-
-lumen:
-  jwt:
-    secret: your-jwt-secret
-    expire-seconds: 3600
-    refresh-expire-seconds: 604800
-  upload:
-    dir: ${USER_HOME}/.lumen-ai/uploads
+        model: deepseek-v4-pro
 ```
 
-### Start Service
+### Run
 
 ```bash
-# Compile
+# Build
 mvn clean package -DskipTests
 
-# Start
-java -jar target/lumen-ai-backend.jar
+# Start (port 9031 by default)
+java -jar target/lumen-ai-backend-0.1.0.jar
 ```
 
-## API Documentation
+Swagger UI: `http://localhost:9031/api/swagger-ui.html`
 
-### Authentication Interfaces
+## API Overview
 
-| Method | Path | Description |
+All endpoints are prefixed with `/api`. See Swagger UI for the full reference; the most-used ones:
+
+| Module | Method & Path | Description |
 |------|------|------|
-| POST | `/auth/register` | User Registration |
-| POST | `/auth/login` | User Login |
-| GET | `/auth/me` | Get Current User Info |
-| POST | `/auth/refresh` | Refresh Access Token |
+| Auth | `POST /auth/register` · `POST /auth/login` · `GET /auth/me` · `POST /auth/refresh` | Register / login / current user / refresh token |
+| Chat | `POST /chat/stream` (SSE) · `POST /chat/permission/{requestId}` · `POST /chat/question/{requestId}` | Streaming chat / tool approval / answer question |
+| Sessions | `GET·POST /sessions` · `GET /sessions/{id}/messages` · `DELETE /sessions/{sessionId}/messages/{messageId}` | Session & message management |
+| Credits | `GET /credits/overview` · `GET /credits/usage` · `GET /credits/rewards` | Credit overview / usage / rewards |
+| Subscription | `GET /subscription/plans` · `GET /subscription/preview` · `POST /subscription/orders` | Plans / upgrade quote / balance-paid order |
+| Balance | `GET /balance/...` | Balance account & recharge transactions |
+| Schedules | `GET·POST /schedules` · `POST /schedules/{id}/run` · `POST /schedules/{id}/toggle` | Task management |
+| Files | `POST /files/upload` · `POST /files/upload-batch` · `GET /files/{key}` | Attachment upload & download |
+| Work Assistant | `/work-assistant/...` | WeChat (iLink) bot binding & messaging |
 
-### Conversation Interfaces
+## Built-in Tools
 
-| Method | Path | Description |
+| Tool | Function | Approval |
 |------|------|------|
-| POST | `/chat/stream` | Streaming Conversation (Returns SSE) |
-| POST | `/chat/permission/{requestId}` | Handle Tool Permission Requests |
-| POST | `/chat/question/{requestId}` | Reply to User Question |
+| `Read` / `Glob` / `Grep` | Read files / find by pattern / regex search | No approval |
+| `WebSearch` / `WebFetch` | Web search / fetch pages | No approval |
+| `DateTime` / `createSchedule` / `listSchedules` | Time / scheduled task management | No approval |
+| `AskUserQuestion` | Ask the user | No approval |
+| `Write` / `Edit` / `Delete` | Write / edit / delete files | Approval by permission tier |
+| `Exec` / `Shell` | Run code / shell commands | Approval by permission tier |
+| `Agent` | Launch a sub-agent for complex tasks | Approval by permission tier |
 
-### Session Management
-
-| Method | Path | Description |
-|------|------|------|
-| GET | `/sessions` | Get Session List |
-| POST | `/sessions` | Create Session |
-| GET | `/sessions/{id}` | Get Session Details |
-| GET | `/sessions/{id}/messages` | Get Message History |
-| DELETE | `/sessions/{sessionId}/messages/{messageId}` | Delete Message |
-
-### Credit Center
-
-| Method | Path | Description |
-|------|------|------|
-| GET | `/credits/overview` | Credit Overview |
-| GET | `/credits/rewards` | Credit Rewards List |
-| GET | `/credits/usage` | Credit Usage Records |
-
-### Scheduled Tasks
-
-| Method | Path | Description |
-|------|------|------|
-| GET | `/schedules` | Task List |
-| POST | `/schedules` | Create Task |
-| POST | `/schedules/{id}/run` | Run Task Immediately |
-| POST | `/schedules/{id}/toggle` | Toggle Status |
-
-### Subscription Management
-
-| Method | Path | Description |
-|------|------|------|
-| GET | `/subscription/plans` | Subscription Plans List |
-| GET | `/subscription/preview` | Preview Subscription Cost |
-| POST | `/subscription/orders` | Create Subscription Order |
-
-### File Management
-
-| Method | Path | Description |
-|------|------|------|
-| POST | `/files/upload` | Upload File |
-| POST | `/files/upload-batch` | Batch Upload |
-| GET | `/files/{key}` | Download File |
-
-## AI Tools Description
-
-The system includes various built-in AI tools that can be invoked via conversation:
-
-| Tool Name | Function | Permission Requirement |
-|----------|------|----------|
-| `Agent` | Launch sub-agent to handle complex tasks | Requires Permission |
-| `Exec` | Execute code (Python/JavaScript/Shell) | Needs Approval |
-| `Shell` | Execute Shell commands | Needs Approval |
-| `Read` | Read file content | None |
-| `Write` | Create or overwrite file | Needs Approval |
-| `Edit` | Edit file | Needs Approval |
-| `Delete` | Delete file/directory | Needs Approval |
-| `Glob` | Search files by pattern | None |
-| `Grep` | Regular expression search file content | None |
-| `WebSearch` | Web Search | None |
-| `WebFetch` | Fetch webpage content | None |
-| `DateTime` | Get current time | None |
-| `createSchedule` | Create scheduled task | None |
-| `listSchedules` | List scheduled tasks | None |
-| `AskUserQuestion` | Ask user questions | None |
-
-### Permission Modes
-
-- **AUTO**: Automatically approve
-- **ASK**: Ask user every time
-- **REJECT**: Directly reject
+User permissions have three tiers (**read-only / smart / full-auto**); write & execute tools trigger a client-side approval dialog depending on the tier.
 
 ## Billing Model
 
-### Credit Calculation
-
-Billing is based on token quantity, formula:
+### Two-phase billing
 
 ```
-Cost = (Input Tokens × Input Price + Output Tokens × Output Price) × User Group Ratio
+Before send   check balance → hold credits (estimated) → write credit_holds
+done          settle with real upstream usage: held → settled, refund or top-up
+error         full refund
+expired       holds older than 10 min are lazily refunded (hooked on hot read paths, no cron)
 ```
 
-Cache hit tokens have discount privileges.
+### Credit formula
 
-### Pre-deduction Mechanism
+```
+cost = cache-hit tokens × input price × cache ratio
+     + cache-miss tokens × input price
+     + output tokens × output price
+     × group ratio
+```
 
-1. Pre-deduct charges before conversation starts (estimated)
-2. Settle based on actual usage after conversation ends
-3. Refund excess or charge deficit; stop if balance is insufficient
+Model pricing (`model_pricing`) and group ratios (`credit_group_ratio`) are database-configured; free models (`is_free=1`) cost nothing.
+
+### Subscription
+
+- Plans, entitlements and prices all live in tables (`subscription_plans` family); all display flags are derived server-side
+- Balance-paid ordering is a single transaction: validate → atomic deduct → order snapshot → subscription change → grant/reclaim credits
+- Upgrades prorate remaining value; credits are granted monthly (`subscription_credit_grants`, lazy catch-up)
 
 ## Core Flow
 
-### Conversation Request Flow
-
 ```
-Client → POST /chat/stream 
-      → Verify JWT Token
-      → Check Credit Balance and Pre-deduct Charges
-      → AgentEngine processes conversation
-      → Stream result (SSE)
-      → Settle and update credits
+Client → POST /api/chat/stream
+      → JWT auth → credit check & hold
+      → AgentEngine loop (tool calls approved by tier)
+      → SSE: token deltas & tool events in real time
+      → done: settle with real usage
 ```
 
-### Tool Invocation Flow
+## Main Tables
 
-```
-AI determines tool invocation needed
-      → Check tool permissions
-      → If insufficient permissions, send request to client
-      → Continue execution after client confirmation
-      → Tool returns result
-      → AI synthesizes response
-```
+| Category | Tables |
+|------|------|
+| Users | `users` |
+| Chat | `sessions` · `messages` · `attachments` |
+| Schedules | `schedules` · `schedule_runs` |
+| Credits | `credit_accounts` · `credit_transactions` · `credit_holds` · `credit_rewards` · `credit_group_ratio` |
+| Pricing | `model_pricing` |
+| Subscription | `subscription_plans` / `_features` / `_billings` · `user_subscriptions` · `subscription_orders` · `subscription_credit_grants` |
+| Balance | `balance_transactions` |
+| Channels | `channel_accounts` · `channel_messages` |
 
-## Database Design
+## Extension
 
-Main data tables:
+### Add a tool
 
-- `users` - User Information
-- `sessions` - Conversation Sessions
-- `messages` - Message Records
-- `schedules` - Scheduled Tasks
-- `schedule_runs` - Task Execution Records
-- `credit_accounts` - Credit Accounts
-- `credit_transactions` - Credit Transactions
-- `credit_holds` - Pre-deduction Records
-- `user_subscriptions` - User Subscriptions
-- `subscription_orders` - Subscription Orders
-- `channel_accounts` - Channel Accounts (Feishu, etc.)
-
-## Extension Development
-
-### Add New Tool
+Implement the `Tool` interface and register it as a Spring bean — the Agent engine discovers it automatically:
 
 ```java
 @Component
 public class CustomTool implements Tool {
     @Override
-    public String name() {
-        return "custom_tool";
-    }
-    
+    public String name() { return "custom_tool"; }
+
     @Override
-    public String description() {
-        return "Custom Tool Description";
-    }
-    
+    public String description() { return "Custom tool description"; }
+
     @Override
     public ToolResult execute(ToolContext ctx, Map<String, Object> args) {
-        // Implement Logic
-        return new ToolResult("Execution Result");
+        return new ToolResult("result");
     }
 }
 ```
 
-### Add New API
+### Add an endpoint
+
+Controllers only validate and delegate; business logic lives in services; responses use the unified `R<T>`. New protected endpoints must be registered in `JwtAuthFilter`'s auth list:
 
 ```java
 @RestController
-@RequestMapping("/api/v1/custom")
+@RequestMapping("/custom")
 @RequiredArgsConstructor
 public class CustomController {
     private final CustomService service;
-    
+
     @GetMapping("/data")
     public R<DataVO> getData() {
         return R.ok(service.getData());
@@ -300,9 +236,9 @@ public class CustomController {
 
 ## License
 
-This project adheres to the open-source license.
+Released under the [MIT License](LICENSE).
 
-## Contact Information
+## Contact
 
-- Project URL: https://gitee.com/daiwenshneg/lumen-ai-backend
-- Issue Feedback: Please submit Issues on the Gitee repository
+- Repository: https://gitee.com/daiwenshneg/lumen-ai-backend
+- Feedback: please open an [Issue](https://gitee.com/daiwenshneg/lumen-ai-backend/issues) on Gitee
