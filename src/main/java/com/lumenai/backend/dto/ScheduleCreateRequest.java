@@ -22,4 +22,12 @@ public class ScheduleCreateRequest {
     private String message;
     private String cron;
     private String timezone;
+    /**
+     * 任务绑定的工作空间 id。
+     *
+     * <p>自动化页「手动新建」由客户端先建好同名空间再带上；「在对话中创建」由
+     * {@code ScheduleTool} 从 {@code AgentContext} 取当前会话的空间自动带上。
+     * 传 null = 无空间（任务只能纯聊天）。</p>
+     */
+    private Long workspaceId;
 }

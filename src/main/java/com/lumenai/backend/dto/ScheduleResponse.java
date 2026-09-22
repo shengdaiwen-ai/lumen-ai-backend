@@ -8,6 +8,8 @@ public class ScheduleResponse {
 
     private Long id;
     private String name;
+    /** 绑定的工作空间 id；null = 无空间（任务运行时本地类工具不下发） */
+    private Long workspaceId;
     private String frequency;
     private String weekday;
     private Integer monthDay;
@@ -28,6 +30,7 @@ public class ScheduleResponse {
         ScheduleResponse r = new ScheduleResponse();
         r.id = s.getId();
         r.name = s.getName();
+        r.workspaceId = s.getWorkspaceId();
         r.frequency = s.getFrequency();
         r.weekday = s.getWeekday();
         r.monthDay = s.getMonthDay();
@@ -51,6 +54,9 @@ public class ScheduleResponse {
 
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
+
+    public Long getWorkspaceId() { return workspaceId; }
+    public void setWorkspaceId(Long workspaceId) { this.workspaceId = workspaceId; }
 
     public String getFrequency() { return frequency; }
     public void setFrequency(String frequency) { this.frequency = frequency; }

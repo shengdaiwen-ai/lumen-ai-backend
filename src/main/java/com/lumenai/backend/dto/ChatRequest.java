@@ -19,4 +19,10 @@ public class ChatRequest {
 
     /** 附件列表 */
     private List<AttachmentDto> attachments;
+
+    /**
+     * 工作空间根目录下 `LUMEN.md` 的正文（客户端读取后上行，作为「项目约定」注入系统提示词）。
+     * <p>限长 8KB，超出由服务端截断；只在内存里中转，不入库不进日志。</p>
+     */
+    private String projectConvention;
 }

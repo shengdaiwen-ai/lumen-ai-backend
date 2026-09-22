@@ -11,6 +11,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.Collections;
 import java.util.List;
@@ -55,9 +56,12 @@ public class Message {
     @TableField("latency_ms")
     private Integer latencyMs;
 
-    /** 本条消息实际消耗积分（服务端两阶段结算结果；NULL = 未扣费，如免费模型） */
+    /**
+     * 本条消息实际消耗积分（服务端两阶段结算结果；NULL = 未扣费，如免费模型）。
+     * 两位小数（列 DECIMAL(12,2)）—— 积分不是粒度为 1 的代币。
+     */
     @TableField("credits_cost")
-    private Integer creditsCost;
+    private BigDecimal creditsCost;
 
     /** tokens 是否为 chars/4 估算（上游未返回 usage 时置位，前端展示「约」） */
     @TableField("credits_estimated")

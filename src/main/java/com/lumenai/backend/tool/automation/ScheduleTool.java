@@ -1,5 +1,6 @@
 package com.lumenai.backend.tool.automation;
 
+import com.lumenai.backend.agent.core.AgentContext;
 import com.lumenai.backend.agent.tool.Tool;
 import com.lumenai.backend.auth.UserContext;
 import com.lumenai.backend.dto.ScheduleCreateRequest;
@@ -117,14 +118,24 @@ public class ScheduleTool implements Tool {
             req.setIntervalValue(intervalValue);
             req.setIntervalUnit(intervalUnit);
             req.setTimezone("Asia/Shanghai");
+            // 继承「当前这次对话」的空间：模型不可能知道空间 id，只能由运行上下文透传。
+            // 不传的话任务建出来就是无空间的，定时跑起来碰不了任何文件。
+            req.setWorkspaceId(AgentContext.getWorkspaceId());
 
             Schedule created = scheduleService.create(userId, req);
             int duration = (int) (System.currentTimeMillis() - start);
 
+            // 无空间时明确提醒：任务建成后靠 AgentEngine 剔除本地类工具来「兜底」，
+            // 但用户看到的是一次成功的创建 —— 不提醒的话，他要等到任务跑完才发现文件没动过。
+            String tail = req.getWorkspaceId() == null
+                    ? "\n⚠️ 本次对话未绑定工作空间，该任务运行时无法读写本机文件。"
+                    + "如需读写文件，请先在输入框左下角选择工作空间，再重新创建任务。"
+                    : "";
+
             return String.format(
-                    "自动化任务创建成功！\n任务ID: %d\n名称: %s\n频率: %s\n执行时间: %02d:%02d\n内容: %s",
+                    "自动化任务创建成功！\n任务ID: %d\n名称: %s\n频率: %s\n执行时间: %02d:%02d\n内容: %s%s",
                     created.getId(), created.getName(), created.getFrequency(),
-                    created.getRunHour(), created.getRunMinute(), created.getMessage()
+                    created.getRunHour(), created.getRunMinute(), created.getMessage(), tail
             );
         } catch (Exception e) {
             log.error("createSchedule failed", e);
@@ -189,6 +200,8 @@ public class ScheduleTool implements Tool {
                 req.setIntervalValue(args.get("intervalValue") != null ? ((Number) args.get("intervalValue")).intValue() : null);
                 req.setIntervalUnit((String) args.get("intervalUnit"));
                 req.setTimezone("Asia/Shanghai");
+                // 与 createSchedule 同理：继承当前运行的空间
+                req.setWorkspaceId(AgentContext.getWorkspaceId());
 
                 Long userId = UserContext.get();
                 if (userId == null) {

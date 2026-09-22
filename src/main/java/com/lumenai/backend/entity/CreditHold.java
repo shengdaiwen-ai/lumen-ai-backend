@@ -6,12 +6,13 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
  * 聊天积分预扣单 credit_holds
  *
- * <p>one-api 式两阶段扣费的中间态载体：请求前按估算预扣（{@code held}），
+ * <p>两阶段扣费的中间态载体：请求前按估算预扣（{@code held}），
  * 完成后按真实 usage 结算（{@code settled}，多退少补），失败/僵尸单退款
  * （{@code refunded} / {@code expired}）。<b>状态是幂等的唯一凭据</b>：
  * 只允许 {@code held → settled/refunded/expired} 的条件更新抢占，
@@ -59,13 +60,13 @@ public class CreditHold {
     @TableField("model_code")
     private String modelCode;
 
-    /** 预扣额（积分） */
+    /** 预扣额（积分，两位小数） */
     @TableField("estimated_cost")
-    private Integer estimatedCost;
+    private BigDecimal estimatedCost;
 
-    /** 结算后的实际消耗（积分），未结算为 NULL */
+    /** 结算后的实际消耗（积分，两位小数），未结算为 NULL */
     @TableField("actual_cost")
-    private Integer actualCost;
+    private BigDecimal actualCost;
 
     /** held / settled / refunded / expired */
     private String status;

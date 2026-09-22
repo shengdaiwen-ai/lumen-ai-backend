@@ -66,6 +66,15 @@ public class DbMigrationRunner implements CommandLineRunner {
         upgradeSubscriptionTables();
         // 聊天积分消耗（两阶段扣费）：计价表 / 预扣单 / 分组倍率 + 流水扩列
         chatBillingTables();
+        // 工作空间（选择工作空间）：元数据表 + 套餐配额表 + sessions 关联列
+        workspaceTables();
+        // 权限档位：四档 → 两档（default / full）的取值迁移（2026-09-22）
+        permissionModeTwoTier();
+        // 废弃对象清理（2026-09-22）：从未上线或已被取代的表/列，从库中移除
+        deprecatedCleanup();
+        // 审计中心（P4，2026-09-22）：沙箱拦截/放行/审批决定的上报落库表
+        createAuditTable();
+        addAuditIsolationColumn();
         // 字符集/排序规则一致性兜底 —— 必须排在所有建表之后
         ensureUtf8mb4Collation();
     }
@@ -562,10 +571,109 @@ public class DbMigrationRunner implements CommandLineRunner {
         // 结算值由服务端写入，是结算那一刻的快照；后续运营调价不回改历史（历史不该被改价）。
         for (String table : new String[]{"messages", "channel_messages"}) {
             addColumnIfNotExists(table, "credits_cost",
-                    "INT NULL COMMENT '本条消息实际消耗积分（服务端两阶段结算结果，NULL=未扣费）'", "output_tokens");
+                    "DECIMAL(12,2) NULL COMMENT '本条消息实际消耗积分（两位小数，NULL=未扣费）'", "output_tokens");
             addColumnIfNotExists(table, "credits_estimated",
                     "TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 = tokens 为 chars/4 估算值（上游未返回 usage）'",
                     "credits_cost");
+        }
+
+        widenCreditsColumns();
+    }
+
+    /**
+     * 工作空间迁移（2026-09-21）。
+     *
+     * <p>两张新表由脚本建（`db/migration_workspaces.sql`：DDL 为 IF NOT EXISTS、
+     * 配额种子为 INSERT IGNORE，可重复执行且不覆盖运营调过的数值）。</p>
+     *
+     * <p>{@code sessions.workspace_id} 是本需求的权威引用列。历史上那个裸路径列
+     * {@code sessions.project_path} 已随 {@link #deprecatedCleanup()} 删除 ——
+     * 服务端存本机路径既无法校验、又属隐私泄露（红线 18）。</p>
+     */
+    private void workspaceTables() {
+        try {
+            Integer tables = jdbcTemplate.queryForObject(
+                    "SELECT COUNT(*) FROM information_schema.TABLES " +
+                            "WHERE TABLE_SCHEMA = DATABASE() " +
+                            "AND TABLE_NAME IN ('workspaces', 'subscription_plan_quotas')",
+                    Integer.class
+            );
+            if (tables != null && tables < 2) {
+                try (Connection conn = dataSource.getConnection()) {
+                    runScript(conn, "db/migration_workspaces.sql");
+                }
+                log.info("迁移完成：工作空间表与套餐配额表已创建");
+            }
+        } catch (Exception e) {
+            log.warn("工作空间表迁移失败: {}", e.getMessage());
+        }
+
+        addColumnIfNotExists("sessions", "workspace_id",
+                "BIGINT UNSIGNED NULL COMMENT '绑定的工作空间 id（权威引用；创建会话时锁定）'",
+                "title");
+        addIndexIfNotExists("sessions", "idx_workspace",
+                "INDEX idx_workspace (workspace_id)");
+
+        // 自动化任务同样要绑空间（2026-09-21）。没有这一列时，任务跑出来的会话恒为「无空间」，
+        // 而 AgentEngine 在 workspaceId==null 时会把 8 个本地类工具整体剔除 —— 自动化任务
+        // 就只是个「会说不能做」的聊天机器人。⚠️ 类型与 sessions.workspace_id 一致
+        // （BIGINT UNSIGNED），否则两列关联比较会走隐式转换、索引失效。
+        addColumnIfNotExists("schedules", "workspace_id",
+                "BIGINT UNSIGNED NULL COMMENT '绑定的工作空间 id（NULL = 无空间，本地类工具不下发）'",
+                "user_id");
+        addIndexIfNotExists("schedules", "idx_sched_workspace",
+                "INDEX idx_sched_workspace (workspace_id)");
+    }
+
+    /**
+     * 积分列精度改造：INT → DECIMAL(12,2)（幂等）。
+     *
+     * <p>根因：积分一开始被当成「粒度为 1 的代币」，所有金额列都是 INT，计价又做
+     * {@code max(1, ceil(raw))} —— 一句「你好」的真实成本约 0.001 积分，却按 1 积分收，
+     * 小额请求被放大了三个数量级。改成两位小数后，列必须一起加宽，否则
+     * Java 侧算出的 0.01 落库会被静默截断成 0（比整数计费更难查：账看着扣了、余额没变）。</p>
+     *
+     * <p>只跑类型不是 decimal 的列：本方法重跑是空操作，注释也不会被覆盖。</p>
+     */
+    private void widenCreditsColumns() {
+        widenToDecimal("credit_holds", "estimated_cost",
+                "DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '预扣额（积分，两位小数）'");
+        widenToDecimal("credit_holds", "actual_cost",
+                "DECIMAL(12,2) NULL COMMENT '结算后的实际消耗（积分，两位小数）'");
+        for (String table : new String[]{"messages", "channel_messages"}) {
+            widenToDecimal(table, "credits_cost",
+                    "DECIMAL(12,2) NULL COMMENT '本条消息实际消耗积分（两位小数，NULL=未扣费）'");
+        }
+        // 流水成本列本就是 DECIMAL；这里只是兜住更早的历史库（若曾是 INT 会被静默取整）
+        widenToDecimal("credit_transactions", "cost",
+                "DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '积分变动量：消耗为正、回收为负'");
+    }
+
+    /**
+     * 把整数列加宽成 DECIMAL（幂等）：仅当当前 {@code DATA_TYPE} 不是 {@code decimal} 才 ALTER。
+     *
+     * <p>整数列转 DECIMAL 是安全的向上加宽（不会丢值）；反过来才会截断，所以本方法只做加宽。</p>
+     */
+    private void widenToDecimal(String table, String column, String definition) {
+        try {
+            List<String> types = jdbcTemplate.queryForList(
+                    "SELECT DATA_TYPE FROM information_schema.COLUMNS " +
+                            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ? AND COLUMN_NAME = ?",
+                    String.class, table, column);
+            if (types.isEmpty()) {
+                log.debug("{}.{} 不存在，跳过精度加宽", table, column);
+                return;
+            }
+            if ("decimal".equalsIgnoreCase(types.get(0))) {
+                log.debug("{}.{} 已是 DECIMAL，跳过", table, column);
+                return;
+            }
+            // 不带 CHARACTER SET：那是字符列的选项，带上会把排序规则退回该字符集的默认值
+            jdbcTemplate.execute(String.format(
+                    "ALTER TABLE %s MODIFY COLUMN %s %s", table, column, definition));
+            log.info("迁移完成：{}.{} 精度已加宽为 DECIMAL(12,2)（原类型 {}）", table, column, types.get(0));
+        } catch (Exception e) {
+            log.warn("{}.{} 精度加宽失败: {}", table, column, e.getMessage());
         }
     }
 
@@ -647,6 +755,163 @@ public class DbMigrationRunner implements CommandLineRunner {
             log.info("迁移完成：已删除历史遗留列 {}.{}", table, column);
         } catch (Exception e) {
             log.warn("删除 {}.{} 失败: {}", table, column, e.getMessage());
+        }
+    }
+
+    /** 表是否存在 */
+    private boolean tableExists(String table) {
+        Integer count = jdbcTemplate.queryForObject(
+                "SELECT COUNT(*) FROM information_schema.TABLES " +
+                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+                Integer.class, table
+        );
+        return count != null && count > 0;
+    }
+
+    /** 删表（幂等）：表不存在直接跳过 */
+    private void dropTableIfExists(String table) {
+        try {
+            if (!tableExists(table)) {
+                log.debug("表 {} 不存在，跳过删除", table);
+                return;
+            }
+            jdbcTemplate.execute("DROP TABLE " + table);
+            log.info("迁移完成：已删除废弃表 {}", table);
+        } catch (Exception e) {
+            log.warn("删除废弃表 {} 失败: {}", table, e.getMessage());
+        }
+    }
+
+    /**
+     * 废弃对象清理（2026-09-22）。
+     *
+     * <p>把「从未上线」与「已被取代」的对象从库里彻底移除。留着它们不是中性的：
+     * 建表脚本里的死表会让人以为功能存在，废弃列会被后来者当作权威字段去读。</p>
+     *
+     * <p>逐条依据：</p>
+     * <ul>
+     *   <li>{@code memories} / {@code tool_calls} / {@code plugins} / {@code mcp_servers} ——
+     *       只在 {@code schema.sql} 里定义过，**从未在任何环境落库**；配套的
+     *       {@code MemoryMapper} / {@code ToolCallMapper} 也无任何注入点（实体与 Mapper 已一并删除）。
+     *       工具调用明细由 {@code messages.tool_calls} JSON 列承载，不需要独立表。</li>
+     *   <li>{@code sessions.project_path} —— 已被 {@code sessions.workspace_id} 取代。
+     *       它在云端架构下既无法校验、又属隐私泄露（红线 18），运行时也无任何消费点。</li>
+     *   <li>{@code workspaces.permission_mode} —— 权限档位改为账号级全局生效
+     *       （用户 2026-09-21 明确要求），空间级覆盖整体废弃。留着这一列会让人
+     *       以为「按空间配权限」是受支持的。</li>
+     *   <li>{@code permissions} —— 工具级三态（auto_allow / ask_user / deny）是旧审批模型的
+     *       残留：与权限档位职责重叠，且工具的危险性本就写在 {@code Tool#requiredPermission()}
+     *       上。审批链已改为「档位 + 工具自身声明 + 客户端沙箱策略」。</li>
+     * </ul>
+     *
+     * <p>幂等：对象不存在时为空操作。调用顺序无要求（都是独立的 DROP）。</p>
+     */
+    private void deprecatedCleanup() {
+        for (String table : new String[]{"memories", "tool_calls", "plugins", "mcp_servers", "permissions"}) {
+            dropTableIfExists(table);
+        }
+        dropColumnIfExists("sessions", "project_path");
+        dropColumnIfExists("workspaces", "permission_mode");
+    }
+
+    /**
+     * 审计中心表（2026-09-22，P4）。
+     *
+     * <p>沙箱判定在客户端（执行下沉），本表的数据由客户端经 {@code POST /audit/events}
+     * 上报落库 —— 服务端只做存储与查询，不做判定。{@code target_digest} 只存摘要：
+     * 命令与路径可能含敏感串，原文进服务端既属隐私泄露（红线 18）又无校验价值。</p>
+     *
+     * <p>幂等：表已存在时跳过（脚本内 DDL 亦为 IF NOT EXISTS，双保险）。</p>
+     */
+    private void createAuditTable() {
+        try {
+            if (tableExists("audit_logs")) {
+                log.debug("audit_logs 已存在，跳过迁移");
+                return;
+            }
+            try (Connection conn = dataSource.getConnection()) {
+                runScript(conn, "db/migration_audit_logs.sql");
+            }
+            log.info("迁移完成：审计中心表 audit_logs 已创建");
+        } catch (Exception e) {
+            log.warn("audit_logs 迁移失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * P5：audit_logs 增加隔离层级列（存量库幂等补列）。
+     *
+     * <p>取值 {@code os-fence} / {@code policy-only}。存量为默认 {@code policy-only}：
+     * P4 时代的记录确实只经策略层执行，如实回填，不假称隔离过。</p>
+     */
+    private void addAuditIsolationColumn() {
+        try {
+            if (tableExists("audit_logs")) {
+                addColumnIfNotExists("audit_logs", "isolation",
+                        "VARCHAR(16) NOT NULL DEFAULT 'policy-only' COMMENT 'P5 隔离层级：os-fence / policy-only'",
+                        "reason");
+            }
+        } catch (Exception e) {
+            log.warn("audit_logs.isolation 补列失败: {}", e.getMessage());
+        }
+    }
+
+    /**
+     * 权限档位：四档 → 两档（2026-09-22，对齐 WorkBuddy）。
+     *
+     * <p>取值范围由 {@code manual / smart / fully / custom} 收敛为 {@code default / full}。
+     * 存量迁移方向：{@code fully} → {@code full}（用户当初选的就是「不再逐次审批」），
+     * 其余一律 → {@code default}。</p>
+     *
+     * <p>🔴 <b>为什么「其余一律 default」而不是按语义一一对应</b>：旧 {@code smart} 是
+     * 「重要操作由 AI 自动批准」，新模型里没有对应物 —— 它既不是完全放开、也不是逐次确认。
+     * 迁到 {@code default} 是多问一次（安全侧）；迁到 {@code full} 等于替用户把审批全关了。
+     * 同理 {@code custom} 的自定义规则在新模型里由客户端沙箱策略承载，服务端只知道两档。</p>
+     *
+     * <p>幂等：取值已合法时 UPDATE 命中 0 行；列定义的 ALTER 只在默认值/可空性不符时执行，
+     * 不会每次启动都重建表（{@code MODIFY COLUMN} 对 VARCHAR 是重建操作）。</p>
+     */
+    private void permissionModeTwoTier() {
+        try {
+            int upgraded = jdbcTemplate.update(
+                    "UPDATE users SET permission_mode = 'full' WHERE permission_mode = 'fully'");
+            if (upgraded > 0) {
+                log.info("迁移完成：{} 个用户的权限档位 fully → full", upgraded);
+            }
+            int downgraded = jdbcTemplate.update(
+                    "UPDATE users SET permission_mode = 'default' " +
+                            "WHERE permission_mode IS NULL OR permission_mode NOT IN ('default', 'full')");
+            if (downgraded > 0) {
+                log.info("迁移完成：{} 个用户的权限档位已收敛为 default", downgraded);
+            }
+        } catch (Exception e) {
+            log.warn("权限档位取值迁移失败: {}", e.getMessage());
+        }
+
+        // 列定义对齐 schema.sql：NOT NULL DEFAULT 'default'
+        try {
+            List<Map<String, Object>> cols = jdbcTemplate.queryForList(
+                    "SELECT COLUMN_DEFAULT, IS_NULLABLE FROM information_schema.COLUMNS " +
+                            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'users' " +
+                            "AND COLUMN_NAME = 'permission_mode'");
+            if (cols.isEmpty()) {
+                log.debug("users.permission_mode 不存在，跳过列定义对齐");
+                return;
+            }
+            Object def = cols.get(0).get("COLUMN_DEFAULT");
+            Object nullable = cols.get(0).get("IS_NULLABLE");
+            boolean upToDate = def != null && "default".equalsIgnoreCase(String.valueOf(def))
+                    && !"YES".equalsIgnoreCase(String.valueOf(nullable));
+            if (upToDate) {
+                log.debug("users.permission_mode 列定义已符合预期，跳过");
+                return;
+            }
+            jdbcTemplate.execute(
+                    "ALTER TABLE users MODIFY COLUMN permission_mode " +
+                            "VARCHAR(16) NOT NULL DEFAULT 'default' COMMENT 'default(默认权限) / full(完全访问权限)'");
+            log.info("迁移完成：users.permission_mode 列定义已对齐（NOT NULL DEFAULT 'default'）");
+        } catch (Exception e) {
+            log.warn("users.permission_mode 列定义对齐失败: {}", e.getMessage());
         }
     }
 

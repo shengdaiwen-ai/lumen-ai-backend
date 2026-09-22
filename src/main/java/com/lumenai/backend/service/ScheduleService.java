@@ -19,6 +19,7 @@ import java.util.stream.Collectors;
 public class ScheduleService {
 
     private final ScheduleMapper scheduleMapper;
+    private final WorkspaceService workspaceService;
 
     public List<ScheduleResponse> listByUser(Long userId) {
         List<Schedule> list = scheduleMapper.selectList(
@@ -33,6 +34,13 @@ public class ScheduleService {
         Schedule s = new Schedule();
         s.setUserId(userId);
         s.setName(req.getName() != null ? req.getName() : "新自动化任务");
+        // 绑定的空间只接受「自己名下」的（越权 id 直接 404）。这里<b>不</b>校验设备：
+        // 任务的执行设备由空间自身决定（ScheduleRunner 用 ws.deviceId 建会话），
+        // 与「在哪台机器上点了创建」无关 —— 用户在 A 机建任务、空间属于 A 机是常态，
+        // 但接口不该把这条当硬约束（否则共享/迁移场景全被堵死）。
+        if (req.getWorkspaceId() != null) {
+            s.setWorkspaceId(workspaceService.getOrThrow(userId, req.getWorkspaceId()).getId());
+        }
         s.setFrequency(req.getFrequency());
         s.setWeekday(req.getWeekday());
         s.setMonthDay(req.getMonthDay());

@@ -17,6 +17,12 @@ public class R<T> implements Serializable {
     private T data;
     private long timestamp = System.currentTimeMillis();
 
+    /**
+     * 机器可读错误码（见 {@code ErrorCode}），仅失败时有值。
+     * <p>前端按它分支（引导升级 / 提示改名 / 顶部横幅），不匹配文案。</p>
+     */
+    private String errorCode;
+
     public static <T> R<T> ok() {
         return ok(null);
     }
@@ -33,6 +39,12 @@ public class R<T> implements Serializable {
         R<T> r = new R<>();
         r.setCode(code);
         r.setMessage(message);
+        return r;
+    }
+
+    public static <T> R<T> fail(int code, String errorCode, String message) {
+        R<T> r = fail(code, message);
+        r.setErrorCode(errorCode);
         return r;
     }
 

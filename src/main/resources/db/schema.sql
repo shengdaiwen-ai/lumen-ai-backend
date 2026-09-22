@@ -1,7 +1,14 @@
 -- ============================================================
--- Lumen AI Backend - Database Schema
--- Version: 0.1.0
+-- Lumen AI Backend - Database Schema（新建库基线，**非启动脚本**）
+-- Version: 0.2.0
 -- Engine: MySQL 8.0+
+-- ------------------------------------------------------------
+-- ⚠️ 本文件不参与启动迁移：DbMigrationRunner 只执行 db/migration_*.sql。
+-- 它的用途是「从零建库时的基线定义」与人工查阅；新增表/列时请**同时**更新本文件
+-- 与对应的 migration 脚本，否则两者会漂移（本文件历史上就漂过一次）。
+--
+-- 2026-09-22 清理：删除 memories / tool_calls / plugins / mcp_servers 四张从未上线的
+-- 脚手架表，以及 sessions.project_path（已被 sessions.workspace_id 取代的裸路径列，红线 18）。
 -- ============================================================
 
 CREATE DATABASE IF NOT EXISTS lumen_ai
@@ -21,6 +28,7 @@ CREATE TABLE users (
   avatar_url   VARCHAR(500) DEFAULT NULL,
   created_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at   DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  permission_mode VARCHAR(16) NOT NULL DEFAULT 'default' COMMENT 'default(默认权限) / full(完全访问权限)',
   INDEX idx_email (email)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='用户表';
 
@@ -28,14 +36,16 @@ CREATE TABLE users (
 DROP TABLE IF EXISTS sessions;
 CREATE TABLE sessions (
   id           BIGINT AUTO_INCREMENT PRIMARY KEY,
+  user_id      BIGINT        NOT NULL,
   title        VARCHAR(255)  NOT NULL DEFAULT '新会话',
-  project_path VARCHAR(500)  DEFAULT NULL,
+  workspace_id BIGINT UNSIGNED DEFAULT NULL COMMENT '绑定的工作空间 id（权威引用；创建会话时锁定）',
   mode         VARCHAR(32)   NOT NULL DEFAULT 'default' COMMENT 'default / plan / specify',
-  status       VARCHAR(32)   NOT NULL DEFAULT 'active'   COMMENT 'active / archived',
+  status       VARCHAR(32)   NOT NULL DEFAULT 'active'   COMMENT 'active / pinned / archived',
   created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_status (status),
-  INDEX idx_created (created_at)
+  INDEX idx_created (created_at),
+  INDEX idx_workspace (workspace_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='会话表';
 
 -- --------------------------- messages ---------------------------
@@ -58,69 +68,12 @@ CREATE TABLE messages (
   CONSTRAINT fk_msg_session FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='消息表';
 
--- --------------------------- tool_calls ---------------------------
-DROP TABLE IF EXISTS tool_calls;
-CREATE TABLE tool_calls (
-  id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-  message_id   BIGINT        NOT NULL,
-  tool_name    VARCHAR(64)   NOT NULL,
-  args         JSON          DEFAULT NULL,
-  output       MEDIUMTEXT    DEFAULT NULL,
-  status       VARCHAR(16)   NOT NULL COMMENT 'success / failed / cancelled',
-  duration_ms  INT           DEFAULT 0,
-  created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_message (message_id),
-  INDEX idx_tool_name (tool_name),
-  INDEX idx_status (status),
-  CONSTRAINT fk_tc_message FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='工具调用表';
-
--- --------------------------- memories ---------------------------
-DROP TABLE IF EXISTS memories;
-CREATE TABLE memories (
-  id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-  scope        VARCHAR(16)   NOT NULL COMMENT 'user / project / session',
-  scope_id     VARCHAR(64)   DEFAULT NULL,
-  content      TEXT          NOT NULL,
-  keywords     VARCHAR(500)  DEFAULT NULL,
-  ttl_days     INT           DEFAULT 30,
-  created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_scope (scope, scope_id),
-  INDEX idx_ttl (ttl_days)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='记忆表';
-
--- --------------------------- plugins ---------------------------
-DROP TABLE IF EXISTS plugins;
-CREATE TABLE plugins (
-  id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-  name         VARCHAR(64)   NOT NULL,
-  version      VARCHAR(32)   NOT NULL,
-  enabled      TINYINT(1)    NOT NULL DEFAULT 1,
-  config       JSON          DEFAULT NULL,
-  installed_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_name (name),
-  INDEX idx_enabled (enabled)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='插件表';
-
--- --------------------------- mcp_servers ---------------------------
-DROP TABLE IF EXISTS mcp_servers;
-CREATE TABLE mcp_servers (
-  id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-  name         VARCHAR(64)   NOT NULL,
-  command      VARCHAR(500)  DEFAULT NULL,
-  args         JSON          DEFAULT NULL,
-  env          JSON          DEFAULT NULL,
-  status       VARCHAR(16)   NOT NULL DEFAULT 'offline' COMMENT 'online / offline / error',
-  auth_config  JSON          DEFAULT NULL,
-  created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_status (status)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='MCP 服务器表';
-
 -- --------------------------- schedules ---------------------------
 DROP TABLE IF EXISTS schedules;
 CREATE TABLE schedules (
   id              BIGINT AUTO_INCREMENT PRIMARY KEY,
   user_id         BIGINT        NOT NULL,
+  workspace_id    BIGINT UNSIGNED DEFAULT NULL COMMENT '绑定的工作空间 id（NULL = 无空间，本地类工具不下发）',
   name            VARCHAR(128)  NOT NULL,
   frequency       VARCHAR(16)   DEFAULT NULL COMMENT '每天/每周/每月/间隔触发',
   weekday         VARCHAR(32)   DEFAULT NULL COMMENT '每周几，逗号分隔如 1,3,5',
@@ -139,7 +92,8 @@ CREATE TABLE schedules (
   updated_at      DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   INDEX idx_sched_user (user_id),
   INDEX idx_status (status),
-  INDEX idx_sched_freq (frequency)
+  INDEX idx_sched_freq (frequency),
+  INDEX idx_sched_workspace (workspace_id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='定时任务表';
 
 -- --------------------------- schedule_runs ---------------------------
@@ -149,6 +103,8 @@ CREATE TABLE schedule_runs (
   schedule_id  BIGINT        NOT NULL,
   user_id      BIGINT        NOT NULL,
   status       VARCHAR(16)   NOT NULL COMMENT 'success / failed / running',
+  trigger_type VARCHAR(16)   NOT NULL DEFAULT 'manual' COMMENT 'manual(手动立即执行) / auto(定时自动执行)',
+  session_id   BIGINT        DEFAULT NULL,
   result       TEXT          DEFAULT NULL,
   error        TEXT          DEFAULT NULL,
   started_at   DATETIME      NOT NULL,
@@ -156,32 +112,53 @@ CREATE TABLE schedule_runs (
   INDEX idx_schedule (schedule_id),
   INDEX idx_user (user_id),
   INDEX idx_status (status),
+  INDEX idx_trigger_type (trigger_type),
   CONSTRAINT fk_runs_schedule FOREIGN KEY (schedule_id) REFERENCES schedules(id) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='定时任务执行历史表';
 
--- --------------------------- permissions ---------------------------
-DROP TABLE IF EXISTS permissions;
-CREATE TABLE permissions (
-  id           BIGINT AUTO_INCREMENT PRIMARY KEY,
-  tool_name    VARCHAR(64)   NOT NULL UNIQUE,
-  default_mode VARCHAR(32)   NOT NULL DEFAULT 'ask_user' COMMENT 'auto_allow=安全操作,隔离环境下自动放行 | ask_user=重要操作,手动审批需用户确认,自动审批AI自动批准 | deny=高风险操作,隔离环境下直接阻止',
-  updated_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='工具权限配置表';
+-- --------------------------- workspaces ---------------------------
+-- 🔴 只存元数据，**没有路径列**（红线 18）：本机绝对路径只在客户端。
+-- （原 permission_mode 列已废弃 —— 权限档位改为全局生效，不再按空间覆盖。）
+DROP TABLE IF EXISTS workspaces;
+CREATE TABLE workspaces (
+  id           BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id      BIGINT UNSIGNED NOT NULL COMMENT '归属用户',
+  device_id    VARCHAR(64)   NOT NULL COMMENT '客户端安装期生成的设备标识（哪台机器上的空间）',
+  name         VARCHAR(64)   NOT NULL COMMENT '展示名，默认取目录名',
+  last_used_at DATETIME      DEFAULT NULL COMMENT '最近使用时间，列表按它倒序',
+  created_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  updated_at   DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  UNIQUE KEY uk_user_device_name (user_id, device_id, name),
+  INDEX idx_user_device (user_id, device_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='工作空间元数据表（不含路径）';
 
--- 初始化内置工具权限
-INSERT INTO permissions (tool_name, default_mode) VALUES
-  ('Read',         'auto_allow'),
-  ('Glob',         'auto_allow'),
-  ('Grep',         'auto_allow'),
-  ('LS',           'auto_allow'),
-  ('Write',        'ask_user'),
-  ('Edit',         'ask_user'),
-  ('Delete',       'ask_user'),
-  ('Shell',        'ask_user'),
-  ('Exec',         'ask_user'),
-  ('WebSearch',    'ask_user'),
-  ('WebFetch',     'ask_user'),
-  ('Agent',        'ask_user'),
-  ('AskUserQuestion', 'auto_allow'),
-  ('DateTime',     'auto_allow'),
-  ('ScheduleTool', 'ask_user');
+-- --------------------------- permissions（已删除） ---------------------------
+-- 原 permissions 表存「工具级三态」（auto_allow / ask_user / deny），是旧审批模型的残留：
+--   (1) 与权限档位（users.permission_mode）职责重叠 —— 同一个决定有两处真源；
+--   (2) 工具的危险性本就写在工具自己身上（Tool#requiredPermission()），放库里必然
+--       「改了库、代码里的工具声明没改」。
+-- 2026-09-22 重构后由「2 档权限 + 工具自身声明 + 客户端沙箱策略」决定，该表已删除
+-- （存量库由 DbMigrationRunner#deprecatedCleanup 启动时 DROP）。
+
+-- --------------------------- audit_logs ---------------------------
+-- 审计中心（P4，2026-09-22）：客户端沙箱的拦截/放行/审批决定上报落库。
+-- 判定在客户端（执行下沉），服务端只存不判；target_digest 只存摘要
+-- （SHA-256 前 16 位 hex），原文（命令/路径/URL）不进服务端（红线 18）。
+-- 与迁移脚本 db/migration_audit_logs.sql 保持同步。
+CREATE TABLE audit_logs (
+  id            BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  user_id       BIGINT UNSIGNED NOT NULL COMMENT '归属用户（上报者 JWT 主体，不信任请求体）',
+  device_id     VARCHAR(64)   NULL COMMENT '产生该事件的设备标识',
+  session_id    BIGINT UNSIGNED NULL COMMENT '关联会话（可空）',
+  workspace_id  BIGINT UNSIGNED NULL COMMENT '关联工作空间元数据 id（不含路径）',
+  type          VARCHAR(16)   NOT NULL COMMENT 'file / command / network(预留)',
+  tool_name     VARCHAR(32)   NOT NULL COMMENT '工具名',
+  target_digest VARCHAR(64)   NOT NULL COMMENT '目标摘要，不存原文',
+  decision      VARCHAR(16)   NOT NULL COMMENT 'allow / deny',
+  reason        VARCHAR(512)  NULL COMMENT '判定原因（不含路径原文）',
+  isolation     VARCHAR(16)   NOT NULL DEFAULT 'policy-only' COMMENT 'P5 隔离层级：os-fence / policy-only',
+  created_at    DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_audit_user_time (user_id, created_at),
+  INDEX idx_audit_user_type (user_id, type),
+  INDEX idx_audit_user_decision (user_id, decision)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='审计中心：沙箱拦截/放行/审批决定（目标只存摘要）';

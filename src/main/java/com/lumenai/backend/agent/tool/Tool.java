@@ -38,9 +38,16 @@ public interface Tool {
         DENY
     }
 
+    /**
+     * 工具执行上下文。
+     *
+     * <p>🔴 <b>不含任何路径</b>（红线 18）：服务端不接触本机路径，路径解析与沙箱判定
+     * 一律在客户端完成。历史上这里有个 {@code projectPath} 字段，是「服务端存会话工作目录」
+     * 那一版的残留 —— 在云端部署模型下它既无法校验、又属隐私泄露，已随
+     * {@code sessions.project_path} 一并废弃。</p>
+     */
     record ToolContext(
             Long sessionId,
-            String projectPath,
             Map<String, Object> metadata
     ) {}
 

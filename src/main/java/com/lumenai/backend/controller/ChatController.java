@@ -8,11 +8,13 @@ import com.lumenai.backend.dto.ChatRequest;
 import com.lumenai.backend.dto.CreditsInfoVO;
 import com.lumenai.backend.dto.SessionCreateRequest;
 import com.lumenai.backend.dto.SessionUpdateRequest;
+import com.lumenai.backend.dto.ToolResultRequest;
 import com.lumenai.backend.entity.CreditHold;
 import com.lumenai.backend.entity.Message;
 import com.lumenai.backend.entity.Session;
 import com.lumenai.backend.mapper.MessageMapper;
 import com.lumenai.backend.service.ChatBillingService;
+import com.lumenai.backend.service.ClientToolGateway;
 import com.lumenai.backend.service.ScheduleRunService;
 import com.lumenai.backend.service.SessionService;
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
@@ -37,7 +39,7 @@ import com.lumenai.backend.common.response.R;
 /**
  * 聊天 SSE 接口
  *
- * <p>积分扣费走 one-api 式<b>两阶段</b>，三个阶段分别落在本类的三个位置：</p>
+ * <p>积分扣费走<b>两阶段</b>，三个阶段分别落在本类的三个位置：</p>
  * <ol>
  *   <li><b>预扣</b>：调模型之前（余额不够直接拒绝，连用户消息都不落库）；</li>
  *   <li><b>结算</b>：{@code done} 事件处（按真实 usage 多退少补，并把 {@code credits} 附回事件给前端）；</li>
@@ -63,16 +65,18 @@ public class ChatController {
     private final ObjectMapper objectMapper;
     private final ScheduleRunService scheduleRunService;
     private final ChatBillingService chatBillingService;
+    private final ClientToolGateway clientToolGateway;
 
     /** 发送消息并流式返回 AI 回复 */
     @PostMapping(value = "/stream", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public Flux<ServerSentEvent<String>> stream(@RequestBody ChatRequest req) {
+    public Flux<ServerSentEvent<String>> stream(@RequestBody ChatRequest req,
+                                                @RequestHeader(value = "X-Device-Id", required = false) String deviceId) {
         Long userId = UserContext.get();
         Long sessionId = req.getSessionId();
 
         // 没有 sessionId 就自动创建
         if (sessionId == null) {
-            Session created = sessionService.create(userId, new SessionCreateRequest());
+            Session created = sessionService.create(userId, new SessionCreateRequest(), deviceId);
             sessionId = created.getId();
         }
         Session session = sessionService.getOrThrow(userId, sessionId);
@@ -83,6 +87,9 @@ public class ChatController {
         ChatMessageRequest engineReq = new ChatMessageRequest();
         engineReq.setContent(req.getContent());
         engineReq.setAttachments(req.getAttachments());
+        // 设备维度 + 项目约定（LUMEN.md）随请求进来：前者决定本地类工具下不下发，后者进系统提示词
+        engineReq.setDeviceId(deviceId);
+        engineReq.setProjectConvention(req.getProjectConvention());
         log.info("[ChatController] attachments received: count={}, content={}",
                 req.getAttachments() == null ? 0 : req.getAttachments().size(),
                 req.getAttachments());
@@ -156,7 +163,21 @@ public class ChatController {
         return flux
                 .map(event -> handleEvent(event, finalUserId, finalSessionId, requestId, recordTitle,
                         usage, hold, settled, scheduleRunId))
-                .doFinally(signal -> finalizeIfNeeded(finalUserId, requestId, recordTitle, usage, hold, settled, signal));
+                .doFinally(signal -> {
+                    finalizeIfNeeded(finalUserId, requestId, recordTitle, usage, hold, settled, signal);
+                    // 流终止（用户点停止 / 客户端退出 / 异常）：唤醒所有还在等客户端结果的工具调用，
+                    // 否则等待的是 Agent 循环线程，会一直悬挂到 deadline（线程泄漏 + 流不结束）
+                    releasePendingToolCalls(finalUserId, finalSessionId);
+                });
+    }
+
+    /** 释放该用户在途的工具调用等待（通道侧兜底，见 ClientToolGateway#releaseAllForUser） */
+    private void releasePendingToolCalls(Long userId, Long sessionId) {
+        try {
+            clientToolGateway.releaseAllForUser(userId, null);
+        } catch (Exception e) {
+            log.warn("释放在途工具调用失败 userId={} sessionId={}", userId, sessionId, e);
+        }
     }
 
     /**
@@ -379,6 +400,23 @@ public class ChatController {
             return R.fail(400, "missing 'approved' field");
         }
         agentEngine.resolvePermission(requestId, approved);
+        return R.ok();
+    }
+
+    /**
+     * 客户端回传本地工具的执行结果（工具执行通道的上行端点）。
+     *
+     * <p>与被照抄的 {@code /permission/{requestId}} 同构：服务端阻塞等结果，
+     * 这里 countDown 解锁。🔴 <b>必须校验 callId 归属当前用户</b> ——
+     * 否则任何人拿到一个 callId 就能解锁别人的工具调用（越权投毒）。</p>
+     */
+    @PostMapping("/tool-result/{callId}")
+    public R<Void> resolveToolResult(@PathVariable String callId, @RequestBody ToolResultRequest body) {
+        boolean ok = clientToolGateway.resolve(callId, UserContext.get(), body);
+        if (!ok) {
+            // 已经超时 / 断线 / 不属于本人：不是致命错误，客户端无需重试
+            return R.fail(404, "工具调用不存在或已超时");
+        }
         return R.ok();
     }
 

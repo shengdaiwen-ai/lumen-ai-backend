@@ -21,6 +21,16 @@ public class Schedule {
     @TableField("user_id")
     private Long userId;
 
+    /**
+     * 绑定的工作空间 id（建任务时锁定，之后不改）。
+     *
+     * <p>NULL = 无空间：运行时 {@code AgentEngine} 会剔除全部本地类工具，
+     * 任务只能聊天、碰不了文件。自动化任务在自动化页手动新建时会自动获得一个
+     * <b>与任务同名</b>的专属空间（目录名 = 界面名，同一个字符串）。</p>
+     */
+    @TableField("workspace_id")
+    private Long workspaceId;
+
     private String name;
 
     /** 频率：每天 / 每周 / 每月 / 间隔触发 */

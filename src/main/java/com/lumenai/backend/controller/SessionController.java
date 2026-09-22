@@ -9,6 +9,7 @@ import com.lumenai.backend.entity.Message;
 import com.lumenai.backend.entity.Session;
 import com.lumenai.backend.mapper.MessageMapper;
 import com.lumenai.backend.service.SessionService;
+import com.lumenai.backend.service.WorkspaceService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.web.bind.annotation.*;
 
@@ -20,6 +21,7 @@ import java.util.List;
 public class SessionController {
 
     private final SessionService sessionService;
+    private final WorkspaceService workspaceService;
     private final MessageMapper messageMapper;
 
     /** 列出当前用户的会话 */
@@ -28,12 +30,25 @@ public class SessionController {
         return R.ok(sessionService.listByUser(UserContext.get()));
     }
 
-    /** 创建会话 */
+    /** 创建会话（带工作空间绑定；需 X-Device-Id 判定该空间是否在本机） */
     @PostMapping
-    public R<SessionResponse> create(@RequestBody(required = false) SessionCreateRequest req) {
+    public R<SessionResponse> create(@RequestBody(required = false) SessionCreateRequest req,
+                                     @RequestHeader(value = "X-Device-Id", required = false) String deviceId) {
         if (req == null) req = new SessionCreateRequest();
-        Session s = sessionService.create(UserContext.get(), req);
-        return R.ok(SessionResponse.from(s, null, false));
+        Session s = sessionService.create(UserContext.get(), req, deviceId);
+        return R.ok(SessionResponse.from(s, null, false, workspaceNameOf(s, deviceId)));
+    }
+
+    /** 会话绑定的空间名（空间事后被移除时返回 null，仅影响展示，不影响会话可用性） */
+    private String workspaceNameOf(Session s, String deviceId) {
+        if (s.getWorkspaceId() == null) return null;
+        try {
+            com.lumenai.backend.entity.Workspace ws =
+                    workspaceService.resolveForDevice(s.getUserId(), s.getWorkspaceId(), deviceId);
+            return ws == null ? null : ws.getName();
+        } catch (Exception e) {
+            return null;
+        }
     }
 
     /** 获取会话详情 */

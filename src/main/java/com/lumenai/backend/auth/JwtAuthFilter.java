@@ -40,7 +40,11 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             "/api/work-assistant/accounts",
             "/api/work-assistant/messages",
             "/api/work-assistant/sessions",
-            "/api/work-assistant/reply/stream"
+            "/api/work-assistant/reply/stream",
+            // 工作空间（选择工作空间需求）—— 新增受保护接口必须登记（红线 10）
+            "/api/workspace",
+            // 审计中心（P4）：上报 / 列表 / 导出全部需要登录，记录按 JWT 主体隔离
+            "/api/audit"
     );
 
     /** 明确不需要 Access Token 的路径（refresh 自带 refresh token） */
@@ -73,7 +77,7 @@ public class JwtAuthFilter extends OncePerRequestFilter {
         // CORS headers（所有请求都加，包括预检）
         response.setHeader("Access-Control-Allow-Origin", "*");
         response.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS");
-        response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+        response.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Device-Id");
         response.setHeader("Access-Control-Allow-Credentials", "true");
 
         // OPTIONS 预检请求直接放行

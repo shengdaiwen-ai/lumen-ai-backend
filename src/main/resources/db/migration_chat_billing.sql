@@ -1,7 +1,7 @@
 -- ============================================================
 -- 迁移：聊天积分消耗（两阶段扣费）三张表 + 初始数据
 --   model_pricing       模型单价（积分/千token，运营可改，红线 14 禁硬编码）
---   credit_holds        预扣单（one-api 式两阶段扣费的关联载体）
+--   credit_holds        预扣单（两阶段扣费的关联载体）
 --   credit_group_ratio  分组倍率（plan / channel / default 三层查找）
 -- 幂等：CREATE TABLE IF NOT EXISTS；种子数据带 NOT EXISTS 判重，重复执行不覆盖运营调整。
 -- 列变更（credit_transactions 的 message_id/tokens/hold_id）由 DbMigrationRunner 逐列 ALTER。
@@ -32,8 +32,8 @@ CREATE TABLE IF NOT EXISTS credit_holds (
   channel         VARCHAR(16) NOT NULL DEFAULT 'web' COMMENT 'web(Web 聊天) / ilink(办公助理)',
   conversation_id BIGINT      NULL     COMMENT 'Web 会话 id；办公助理通道无会话概念则为 NULL',
   model_code      VARCHAR(32) NOT NULL COMMENT '本次请求使用的模型',
-  estimated_cost  INT         NOT NULL DEFAULT 0 COMMENT '预扣额（积分）',
-  actual_cost     INT         NULL     COMMENT '结算后的实际消耗（积分）',
+  estimated_cost  DECIMAL(12,2) NOT NULL DEFAULT 0.00 COMMENT '预扣额（积分，两位小数）',
+  actual_cost     DECIMAL(12,2) NULL     COMMENT '结算后的实际消耗（积分，两位小数）',
   status          VARCHAR(16) NOT NULL DEFAULT 'held'
                   COMMENT 'held(已预扣) / settled(已结算) / refunded(已全额退款) / expired(僵尸单清扫退款)',
   created_at      DATETIME    NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS credit_group_ratio (
   created_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   UNIQUE KEY uk_scope (scope)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='积分计价分组倍率（对齐 one-api 的 group ratio）';
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='积分计价分组倍率（按档位/通道分别配倍率）';
 
 -- ---------------------- 模型单价种子 ----------------------
 -- 锚点：1 积分 = ¥0.01。pin = 上游输入价(¥/百万token) ÷ 1,000,000 × 100 = 上游价 / 10000。

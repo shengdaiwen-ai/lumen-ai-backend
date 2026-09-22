@@ -34,7 +34,12 @@ public class User {
     /** 账户余额（元），可用于购买套餐 */
     private BigDecimal balance;
 
-    /** 全局审批模式：manual / smart / fully / custom */
+    /**
+     * 全局权限档位（2 档，2026-09-22 起）：{@code default}（默认权限）/ {@code full}（完全访问权限）。
+     * <p>旧四档 manual / smart / fully / custom 已废弃，存量值由
+     * {@code DbMigrationRunner#permissionModeTwoTier} 启动时迁移。执行侧判据见
+     * {@code AgentEngine#getPermissionMode}：只有 {@code full} 才放行，其余一律按 {@code default}。</p>
+     */
     @TableField("permission_mode")
     private String permissionMode;
 

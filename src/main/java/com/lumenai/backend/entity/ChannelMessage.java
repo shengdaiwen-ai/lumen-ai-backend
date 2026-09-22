@@ -3,6 +3,7 @@ package com.lumenai.backend.entity;
 import com.baomidou.mybatisplus.annotation.*;
 import lombok.Data;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
@@ -57,9 +58,12 @@ public class ChannelMessage {
     @TableField("output_tokens")
     private Integer outputTokens;
 
-    /** 本条消息实际消耗积分（服务端两阶段结算结果；NULL = 未扣费） */
+    /**
+     * 本条消息实际消耗积分（服务端两阶段结算结果；NULL = 未扣费）。
+     * 两位小数（列 DECIMAL(12,2)），与 Web 聊天的 messages.credits_cost 同口径。
+     */
     @TableField("credits_cost")
-    private Integer creditsCost;
+    private BigDecimal creditsCost;
 
     /** tokens 是否为 chars/4 估算（前端展示「约」） */
     @TableField("credits_estimated")

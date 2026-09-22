@@ -12,7 +12,7 @@ import java.time.LocalDateTime;
 /**
  * 积分计价分组倍率 credit_group_ratio
  *
- * <p>对齐 one-api 的 group ratio：最终消耗 = 模型单价 × 分组倍率。作用域三层，
+ * <p>按档位 / 通道分级配倍率：最终消耗 = 模型单价 × 分组倍率。作用域三层，
  * 查找顺序 <b>plan:&lt;当前套餐&gt; → channel:&lt;通道&gt; → default</b>，先命中即用
  * （套餐倍率优先于通道倍率，运营语义直白）。全 1.0 时等价于没有倍率。</p>
  */

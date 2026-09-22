@@ -15,14 +15,14 @@ import java.math.BigDecimal;
 @Builder
 public class CreditsInfoVO {
 
-    /** 本次实际消耗积分（整数） */
-    private int cost;
+    /** 本次实际消耗积分（两位小数，列 DECIMAL(12,2)） */
+    private BigDecimal cost;
 
     /** 预扣额（积分）：请求前先按估算扣掉 */
-    private int preConsumed;
+    private BigDecimal preConsumed;
 
     /** 退回的差额（积分）：预扣额 − 实际消耗 */
-    private int refunded;
+    private BigDecimal refunded;
 
     /** 扣费后余额 */
     private BigDecimal balanceAfter;

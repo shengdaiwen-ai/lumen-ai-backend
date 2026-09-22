@@ -29,7 +29,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * 聊天积分扣费（one-api 式<b>两阶段</b>）
+ * 聊天积分扣费（<b>两阶段</b>）
  *
  * <p>三个动作构成完整闭环，任何一次对话都在这条链上：</p>
  * <ol>
@@ -42,10 +42,16 @@ import java.util.UUID;
  * </ol>
  *
  * <p>为什么不是「先跑完再扣」：余额为 0 的用户也能跑完一次昂贵任务，扣费时扣不动，
- * 平台白送成本。预扣把「能不能付得起」前置到请求发起时，与 one-api 的做法一致。</p>
+ * 平台白送成本。预扣把「能不能付得起」前置到请求发起时。</p>
  *
  * <p>所有价格与倍率都<b>查库</b>（{@code model_pricing} / {@code credit_group_ratio}），
  * 单价属于运营数据，红线 14 禁硬编码 —— 连「未登记模型的兜底价」也在表里（{@code is_fallback}）。</p>
+ *
+ * <p><b>金额精度：两位小数</b>。积分不是「粒度为 1 的代币」—— 以 pro 价（输入 0.2 积分/千 token）
+ * 为例，1 积分≈5,000 输入 token，一次「你好」的真实成本约 0.001 积分。若按整数向上取整，
+ * 小额请求要被收 1 积分（最高放大三个数量级）。故落账一律
+ * {@code DECIMAL(12,2)} / {@code BigDecimal}，内部按 8 位精度算、落账前
+ * {@code HALF_UP} 归到 2 位，一次真实调用的兜底下限是 {@value #MIN_CHARGE_STR} 积分。</p>
  */
 @Slf4j
 @Service
@@ -63,6 +69,15 @@ public class ChatBillingService {
 
     /** 流水标题最大字符数（明细页一行放得下；列本身是 VARCHAR(255)，不靠 DB 兜底） */
     private static final int TITLE_MAX_CHARS = 32;
+
+    /** 落账精度：积分保留两位小数（列均为 DECIMAL(12,2)） */
+    private static final int CREDIT_SCALE = 2;
+
+    /** 一次真实调用的最小扣费：0.01 积分（原实现是「至少 1 积分」，对小额请求放大过度） */
+    private static final BigDecimal MIN_CHARGE = new BigDecimal("0.01");
+
+    /** 最小扣费的字符串形态（{@code @value} 注解只吃常量表达式） */
+    private static final String MIN_CHARGE_STR = "0.01";
 
     private static final BigDecimal THOUSAND = new BigDecimal("1000");
     private static final BigDecimal ONE = BigDecimal.ONE;
@@ -155,15 +170,24 @@ public class ChatBillingService {
      *
      * <pre>
      *   raw = (hit × pin × cache_ratio + miss × pin + out × pout) / 1000 × 分组倍率
-     *   C   = max(1, ceil(raw))        （免费模型 C = 0）
+     *   C   = max(0.01, round(raw, 2))     （免费模型 / 零 token：C = 0）
      * </pre>
+     *
+     * <p>内部按 {@value #CALC_SCALE} 位算出、落账前 {@code HALF_UP} 归到 2 位小数：
+     * 保留高位是为了「单价 × 大 token 数」不丢精度，归到 2 位是因为账本列就是
+     * {@code DECIMAL(12,2)} —— 落库值必须与对外展示、与余额扣减完全一致。</p>
      */
-    public int computeCost(ModelPricing pricing, int hitTokens, int missTokens, int outTokens, BigDecimal groupRatio) {
+    public BigDecimal computeCost(ModelPricing pricing, int hitTokens, int missTokens, int outTokens,
+                                  BigDecimal groupRatio) {
         if (pricing == null) {
-            return 0;
+            return zero();
         }
         if (pricing.getIsFree() != null && pricing.getIsFree() == 1) {
-            return 0;
+            return zero();
+        }
+        if (hitTokens <= 0 && missTokens <= 0 && outTokens <= 0) {
+            // 没有任何 token 就不是一次可计费的调用（预扣阶段也不会走到这里）
+            return zero();
         }
         BigDecimal cacheRatio = pricing.getCacheRatio() == null ? ONE : pricing.getCacheRatio();
         BigDecimal raw = BigDecimal.ZERO;
@@ -179,9 +203,16 @@ public class ChatBillingService {
             raw = raw.add(BigDecimal.valueOf(outTokens).multiply(pricing.getOutputPrice()));
         }
         BigDecimal credits = raw.divide(THOUSAND, CALC_SCALE, RoundingMode.HALF_UP)
-                .multiply(groupRatio == null ? ONE : groupRatio);
-        // 有 token 就是一次真实调用，至少扣 1 积分（与 new-api 的 quota<=0 兜底一致）
-        return Math.max(1, credits.setScale(0, RoundingMode.CEILING).intValue());
+                .multiply(groupRatio == null ? ONE : groupRatio)
+                .setScale(CREDIT_SCALE, RoundingMode.HALF_UP);
+        // 有 token 就是一次真实调用：极小请求（算下来不足一分）也至少收 0.01 积分，
+        // 与「免费模型全程零成本」区分开
+        return credits.signum() <= 0 ? MIN_CHARGE : credits;
+    }
+
+    /** 两位小数的零（保证对外数值 Scale 一致，避免前端拿到 0 与 0.00 两种形态） */
+    private static BigDecimal zero() {
+        return BigDecimal.ZERO.setScale(CREDIT_SCALE, RoundingMode.UNNECESSARY);
     }
 
     // ==================== 阶段 1：预扣 ====================
@@ -205,14 +236,13 @@ public class ChatBillingService {
         creditService.ensureAccounts(userId);
         BigDecimal ratio = groupRatioOf(userId, channel);
         int estOutput = pricing.getMaxOutput() == null || pricing.getMaxOutput() <= 0 ? 8192 : pricing.getMaxOutput();
-        int preCost = computeCost(pricing, 0, (int) Math.min(estInputTokens, Integer.MAX_VALUE), estOutput, ratio);
-        BigDecimal pre = BigDecimal.valueOf(preCost);
+        BigDecimal pre = computeCost(pricing, 0, (int) Math.min(estInputTokens, Integer.MAX_VALUE), estOutput, ratio);
 
         int affected = accountMapper.deductCredits(userId, CreditService.TYPE_GENERAL, pre);
         if (affected == 0) {
             BigDecimal balance = creditService.generalBalanceOf(userId);
-            log.info("预扣被拒（余额不足）userId={} 需要={} 现有={}", userId, preCost, balance);
-            return HoldResult.insufficient(preCost, balance);
+            log.info("预扣被拒（余额不足）userId={} 需要={} 现有={}", userId, pre, balance);
+            return HoldResult.insufficient(pre, balance);
         }
 
         CreditHold hold = new CreditHold();
@@ -221,15 +251,15 @@ public class ChatBillingService {
         hold.setChannel(channel == null ? CreditHold.CHANNEL_WEB : channel);
         hold.setConversationId(conversationId);
         hold.setModelCode(pricing.getModelCode());
-        hold.setEstimatedCost(preCost);
+        hold.setEstimatedCost(pre);
         hold.setStatus(CreditHold.STATUS_HELD);
         hold.setCreatedAt(LocalDateTime.now());
         holdMapper.insert(hold);
 
         BigDecimal balanceAfter = creditService.generalBalanceOf(userId);
         log.info("预扣成功 userId={} channel={} model={} preConsumed={} balanceAfter={} requestId={}",
-                userId, channel, pricing.getModelCode(), preCost, balanceAfter, requestId);
-        return HoldResult.ok(hold.getId(), preCost, balanceAfter);
+                userId, channel, pricing.getModelCode(), pre, balanceAfter, requestId);
+        return HoldResult.ok(hold.getId(), pre, balanceAfter);
     }
 
     /** 生成本次请求的幂等键 */
@@ -270,13 +300,13 @@ public class ChatBillingService {
         int miss = usage == null ? 0 : usage.missTokens();
         int out = usage == null ? 0 : usage.getOutputTokens();
         boolean estimated = usage != null && usage.isEstimated();
-        int cost = computeCost(pricing, hit, miss, out, ratio);
+        BigDecimal cost = computeCost(pricing, hit, miss, out, ratio);
+        BigDecimal preConsumed = hold.getEstimatedCost() == null ? zero() : hold.getEstimatedCost();
 
         // 多退少补：预扣额与实际值的差额，两个方向都用 addBalance（传负数即减）
-        int delta = cost - hold.getEstimatedCost();
-        if (delta != 0) {
-            if (accountMapper.addBalance(userId, CreditService.TYPE_GENERAL,
-                    BigDecimal.valueOf(delta).negate()) == 0) {
+        BigDecimal delta = cost.subtract(preConsumed);
+        if (delta.signum() != 0) {
+            if (accountMapper.addBalance(userId, CreditService.TYPE_GENERAL, delta.negate()) == 0) {
                 log.warn("结算差额调整失败（账户不存在）userId={} delta={}", userId, delta);
             }
         }
@@ -284,7 +314,7 @@ public class ChatBillingService {
                 .eq(CreditHold::getId, hold.getId())
                 .set(CreditHold::getActualCost, cost));
 
-        if (cost > 0) {
+        if (cost.signum() > 0) {
             CreditTransaction tx = new CreditTransaction();
             tx.setUserId(userId);
             tx.setCreditType(CreditService.TYPE_GENERAL);
@@ -294,7 +324,7 @@ public class ChatBillingService {
             tx.setEstimated(estimated);
             tx.setModelName(modelCode != null && !modelCode.isBlank() ? modelCode : hold.getModelCode());
             tx.setProduct("Lumen AI");
-            tx.setCost(BigDecimal.valueOf(cost));
+            tx.setCost(cost);
             tx.setType(CreditTransaction.TYPE_CONSUME);
             tx.setMessageId(messageId);
             tx.setHoldId(hold.getId());
@@ -308,12 +338,12 @@ public class ChatBillingService {
 
         BigDecimal balanceAfter = creditService.generalBalanceOf(userId);
         log.info("结算完成 userId={} requestId={} 预扣={} 实际={} 退回={} tokens(hit/miss/out)={}/{}/{} estimated={}",
-                userId, requestId, hold.getEstimatedCost(), cost, hold.getEstimatedCost() - cost,
+                userId, requestId, preConsumed, cost, preConsumed.subtract(cost),
                 hit, miss, out, estimated);
         return CreditsInfoVO.builder()
                 .cost(cost)
-                .preConsumed(hold.getEstimatedCost())
-                .refunded(hold.getEstimatedCost() - cost)
+                .preConsumed(preConsumed)
+                .refunded(preConsumed.subtract(cost))
                 .balanceAfter(balanceAfter)
                 .inputTokens(hit + miss)
                 .outputTokens(out)
@@ -336,13 +366,13 @@ public class ChatBillingService {
             if (hold == null) {
                 return;
             }
-            if (claim(hold.getId(), CreditHold.STATUS_REFUNDED, 0, LocalDateTime.now()) == 0) {
+            if (claim(hold.getId(), CreditHold.STATUS_REFUNDED, BigDecimal.ZERO, LocalDateTime.now()) == 0) {
                 return;
             }
-            accountMapper.addBalance(userId, CreditService.TYPE_GENERAL,
-                    BigDecimal.valueOf(hold.getEstimatedCost()));
+            BigDecimal amount = hold.getEstimatedCost() == null ? zero() : hold.getEstimatedCost();
+            accountMapper.addBalance(userId, CreditService.TYPE_GENERAL, amount);
             log.info("预扣已退款 userId={} requestId={} amount={} reason={}",
-                    userId, requestId, hold.getEstimatedCost(), reason);
+                    userId, requestId, amount, reason);
         } catch (Exception e) {
             log.warn("退款失败 userId={} requestId={} reason={}", userId, requestId, reason, e);
         }
@@ -369,18 +399,19 @@ public class ChatBillingService {
                 .lt(CreditHold::getCreatedAt, deadline)
                 .orderByAsc(CreditHold::getId)
                 .last("LIMIT " + SWEEP_BATCH));
+        BigDecimal refundedAmount = BigDecimal.ZERO;
         int refunded = 0;
         for (CreditHold hold : stale) {
             if (claim(hold.getId(), CreditHold.STATUS_EXPIRED, null, LocalDateTime.now()) == 0) {
                 continue;
             }
-            accountMapper.addBalance(userId, CreditService.TYPE_GENERAL,
-                    BigDecimal.valueOf(hold.getEstimatedCost()));
+            BigDecimal amount = hold.getEstimatedCost() == null ? zero() : hold.getEstimatedCost();
+            accountMapper.addBalance(userId, CreditService.TYPE_GENERAL, amount);
+            refundedAmount = refundedAmount.add(amount);
             refunded++;
         }
         if (refunded > 0) {
-            log.warn("清扫僵尸预扣单并退款 userId={} 单数={} 合计积分={}", userId, refunded,
-                    stale.stream().mapToInt(CreditHold::getEstimatedCost).sum());
+            log.warn("清扫僵尸预扣单并退款 userId={} 单数={} 合计积分={}", userId, refunded, refundedAmount);
         }
         return refunded;
     }
@@ -392,7 +423,7 @@ public class ChatBillingService {
      *
      * @return 影响行数；0 = 已被别处处理过（幂等挡板）
      */
-    private int claim(Long holdId, String toStatus, Integer actualCost, LocalDateTime at) {
+    private int claim(Long holdId, String toStatus, BigDecimal actualCost, LocalDateTime at) {
         LambdaUpdateWrapper<CreditHold> update = new LambdaUpdateWrapper<CreditHold>()
                 .eq(CreditHold::getId, holdId)
                 .eq(CreditHold::getStatus, CreditHold.STATUS_HELD)
@@ -410,27 +441,28 @@ public class ChatBillingService {
      * <p>权威源是 {@code credit_accounts}，批次只是明细视图 —— 所以这里扣不齐只告警，
      * 不抛异常、不回滚主事务（绝不让展示层的问题影响扣费结果）。</p>
      */
-    private void decrementRewardBatches(Long userId, int cost) {
+    private void decrementRewardBatches(Long userId, BigDecimal cost) {
         try {
             List<CreditReward> rewards = rewardMapper.selectList(new LambdaQueryWrapper<CreditReward>()
                     .eq(CreditReward::getUserId, userId)
                     .eq(CreditReward::getCreditType, CreditService.TYPE_GENERAL)
                     .gt(CreditReward::getRemaining, BigDecimal.ZERO)
                     .last("ORDER BY expires_at IS NULL, expires_at ASC, id ASC"));
-            int left = cost;
+            BigDecimal left = cost;
             for (CreditReward reward : rewards) {
-                if (left <= 0) {
+                if (left.signum() <= 0) {
                     break;
                 }
-                int take = Math.min(left, reward.getRemaining().intValue());
-                if (take <= 0) {
+                // 每个批次最多扣到剩余为 0，多出的部分顺延给下一个批次
+                BigDecimal take = left.min(reward.getRemaining());
+                if (take.signum() <= 0) {
                     continue;
                 }
-                if (rewardMapper.reclaim(reward.getId(), BigDecimal.valueOf(take)) > 0) {
-                    left -= take;
+                if (rewardMapper.reclaim(reward.getId(), take) > 0) {
+                    left = left.subtract(take);
                 }
             }
-            if (left > 0) {
+            if (left.signum() > 0) {
                 log.warn("批次展示扣减未扣齐 userId={} 余额扣减={} 批次未扣={}", userId, cost, left);
             }
         } catch (Exception e) {
@@ -459,21 +491,21 @@ public class ChatBillingService {
      * @param insufficient 余额不足预扣额 → 本次请求必须拒绝
      * @param required     本次预扣所需积分（拒绝时用于提示「应需 / 现有」）
      */
-    public record HoldResult(boolean free, boolean insufficient, Long holdId, int preConsumed,
-                             BigDecimal balanceAfter, int required) {
+    public record HoldResult(boolean free, boolean insufficient, Long holdId, BigDecimal preConsumed,
+                             BigDecimal balanceAfter, BigDecimal required) {
 
         /** 免费模型 / 无计价：不预扣，也不结算 */
         public static HoldResult skipped() {
-            return new HoldResult(true, false, null, 0, null, 0);
+            return new HoldResult(true, false, null, BigDecimal.ZERO, null, BigDecimal.ZERO);
         }
 
         /** 余额不足预扣额（拒绝本次请求） */
-        public static HoldResult insufficient(int required, BigDecimal balance) {
-            return new HoldResult(false, true, null, 0, balance, required);
+        public static HoldResult insufficient(BigDecimal required, BigDecimal balance) {
+            return new HoldResult(false, true, null, BigDecimal.ZERO, balance, required);
         }
 
         /** 预扣成功 */
-        public static HoldResult ok(Long holdId, int preConsumed, BigDecimal balanceAfter) {
+        public static HoldResult ok(Long holdId, BigDecimal preConsumed, BigDecimal balanceAfter) {
             return new HoldResult(false, false, holdId, preConsumed, balanceAfter, preConsumed);
         }
 
