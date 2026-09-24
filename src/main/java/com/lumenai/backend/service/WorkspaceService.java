@@ -8,7 +8,13 @@ import com.lumenai.backend.dto.WorkspaceListVO;
 import com.lumenai.backend.dto.WorkspaceUpdateRequest;
 import com.lumenai.backend.dto.WorkspaceUsageVO;
 import com.lumenai.backend.dto.WorkspaceVO;
+import com.lumenai.backend.entity.Schedule;
+import com.lumenai.backend.entity.ScheduleRun;
+import com.lumenai.backend.entity.Session;
 import com.lumenai.backend.entity.Workspace;
+import com.lumenai.backend.mapper.ScheduleMapper;
+import com.lumenai.backend.mapper.ScheduleRunMapper;
+import com.lumenai.backend.mapper.SessionMapper;
 import com.lumenai.backend.mapper.WorkspaceMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -38,6 +44,9 @@ public class WorkspaceService {
     private static final int MAX_NAME_LENGTH = 64;
 
     private final WorkspaceMapper workspaceMapper;
+    private final SessionMapper sessionMapper;
+    private final ScheduleMapper scheduleMapper;
+    private final ScheduleRunMapper scheduleRunMapper;
     private final WorkspaceQuotaService quotaService;
 
     /** 当前设备的空间列表（`last_used_at` 倒序，nulls last）+ 配额用量 */
@@ -138,16 +147,47 @@ public class WorkspaceService {
     }
 
     /**
-     * 移除登记：<b>只删这一行</b>。
+     * 移除登记：<b>只删这一行</b>，磁盘目录零操作（目录属于用户，服务端既碰不到也不该碰）。
      *
-     * <p>文件系统零操作 —— 磁盘上的目录属于用户，服务端既碰不到也不该碰。
-     * <b>不级联删会话</b>（会话是对话记录，与登记无关）。</p>
+     * <p>⚠️ 例外（2026-09-23 需求）：<b>被自动化任务引用</b>（{@code schedules.workspace_id}）
+     * 的空间，移除登记时其下会话<b>一并删除</b>（含已归档，含执行历史）——
+     * 这种空间是任务的执行目录，任务组从侧栏消失时留下几条孤儿会话挂在
+     * 「工作空间 #id」下只会造成困惑。普通空间（未被任务引用）维持原行为：
+     * 只删登记，会话保留（回填归属是 FR-10 的既有路径）。</p>
      */
     @Transactional
     public void delete(Long userId, Long workspaceId) {
         Workspace w = getOrThrow(userId, workspaceId);
+        Long usedBySchedules = scheduleMapper.selectCount(
+                new LambdaQueryWrapper<Schedule>().eq(Schedule::getWorkspaceId, w.getId()));
+        if (usedBySchedules != null && usedBySchedules > 0) {
+            cascadeDeleteSessions(userId, w.getId());
+        }
         workspaceMapper.deleteById(w.getId());
         log.info("工作空间登记已移除 id={} userId={}（磁盘目录未做任何改动）", w.getId(), userId);
+    }
+
+    /**
+     * 级联删除某空间下的全部会话（给 {@link #delete} 的定时任务空间分支用）。
+     *
+     * <p>口径与 {@code SessionService#delete} 一致：先删执行历史
+     * （{@code schedule_runs}，无外键级联），messages 由外键 {@code ON DELETE CASCADE} 带走。
+     * 注意这里<b>不会</b>连带删除引用该空间的自动化任务本身 —— 任务是否停用由用户在
+     * 自动化页自行决定；空间移除后任务再触发会按「无空间」降级执行（既有行为）。</p>
+     */
+    private void cascadeDeleteSessions(Long userId, Long workspaceId) {
+        List<Session> sessions = sessionMapper.selectList(
+                new LambdaQueryWrapper<Session>()
+                        .eq(Session::getUserId, userId)
+                        .eq(Session::getWorkspaceId, workspaceId)
+                        .select(Session::getId));
+        if (sessions.isEmpty()) return;
+        List<Long> ids = sessions.stream().map(Session::getId).collect(Collectors.toList());
+        scheduleRunMapper.delete(
+                new LambdaQueryWrapper<ScheduleRun>().in(ScheduleRun::getSessionId, ids));
+        sessionMapper.deleteByIds(ids);
+        log.info("定时任务空间移除，级联删除其下会话 workspaceId={} userId={} 会话数={}",
+                workspaceId, userId, ids.size());
     }
 
     /** 取单个（校验归属） */
